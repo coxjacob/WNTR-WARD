@@ -1,0 +1,71 @@
+# WARD development
+
+WARD models the physical effects of cyber attacks on water networks using WNTR.
+The first demonstration will compare a pump shutdown with normal operation.
+The application is local-only, single-user, and will use SQLite. Accounts and
+simultaneous multi-user access are outside the current scope.
+
+## Setup
+
+Install uv and Git, then run:
+
+```powershell
+git clone https://github.com/coxjacob/WNTR-WARD.git
+cd WNTR-WARD
+uv sync --locked --python 3.11
+uv run --locked python -m ward
+uv run --locked python -m pytest tests
+```
+
+Python 3.11 is the minimum supported version. WNTR is version 1.5.0 in this
+repository. Its core dependencies are NumPy, SciPy, NetworkX, pandas, and
+Matplotlib; uv.lock records exact versions for repeatable installation.
+Commit dependency changes together with the updated lockfile.
+
+Installing WNTR builds C++ extensions. On Windows, install Visual Studio Build
+Tools with the Desktop development with C++ workload. On Linux, install your
+distribution's C++ compiler and Python development headers. On macOS, install
+the Xcode command line tools.
+
+The setup command imports WARD and WNTR, reports the WNTR version, and loads
+the bundled Net1 network. It does not run a simulation or start a server.
+Application tests live in tests; inherited WNTR tests live in wntr/tests.
+Dashboard dependencies are selected separately in TASK-03.
+
+## Structure and responsibilities
+
+| Location | Purpose |
+| --- | --- |
+| ward/ | Application code |
+| ward/simulation.py | WNTR access and the setup check |
+| tests/ | Application tests |
+| config/ | Application settings |
+| migrations/ | SQLite database update scripts |
+| docs/ | Application development documentation |
+| demo/ | Demo scenarios and instructions |
+| wntr/ | Inherited simulation library |
+
+Settings will be added as features need them; invalid settings must stop startup
+with a clear error. Database creation and migrations belong to TASK-08. Demo
+scenarios should reuse bundled networks rather than copying them; Net1 is only
+the setup-check network, not the final demonstration network.
+
+The system architecture document remains outside this repository. These notes
+record the implementation boundaries needed for the initial setup.
+
+Future API handlers will validate requests and call scenario, simulation,
+analysis, and storage modules under ward. Scenario code will describe attacks;
+simulation code will apply them to fresh WNTR models and run them. Analysis
+will consume result data, and storage will save scenarios and results to SQLite.
+Only simulation modules will import WNTR. Other modules will exchange ordinary
+data rather than live WNTR models. No WNTR source changes are needed for setup.
+
+The API will load settings and open storage during startup, then close storage
+and release active run resources during shutdown. Simulation failures must be
+reported as failed runs with useful details rather than successful partial
+results. Invalid requests must produce clear validation errors. The setup
+command exits after loading the network and lets errors produce a failing exit
+status. API and database behavior will be implemented in their own tasks.
+
+Use test-first development: add a test for the intended behavior, run it and
+confirm the expected failure, implement the change, then rerun relevant tests.
