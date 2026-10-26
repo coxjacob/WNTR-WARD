@@ -2,6 +2,14 @@
 requires = ["setuptools", "numpy>=2.2.6"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "wntr"
+requires-python = ">=3.11"
+dynamic = ["version", "description", "readme", "authors", "license", "urls", "dependencies", "optional-dependencies"]
+
+[dependency-groups]
+dev = ["pytest"]
+
 [tool.pytest.ini_options]
 markers = ["time_consuming:excluded from ci quick test", "extensions:included only in extensions ci"]
 addopts = "--doctest-modules"

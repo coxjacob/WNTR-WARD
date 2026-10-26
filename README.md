@@ -3,6 +3,8 @@
 </h1><br>
 <h2> Watter Attack Response & Detection (WARD) </h2>
 
+For WARD setup and application structure, see [WARD development](docs/README.md).
+
 [![GitHub CI](https://github.com/USEPA/WNTR/actions/workflows/test_core.yml/badge.svg)](https://github.com/USEPA/WNTR/actions/workflows/test_repository.yml)
 [![Coverage Status](https://coveralls.io/repos/github/USEPA/WNTR/badge.svg?branch=main)](https://coveralls.io/github/USEPA/WNTR?branch=main)
 [![Documentation Status](https://github.com/USEPA/WNTR/actions/workflows/build_deploy_pages.yml/badge.svg)](https://github.com/usepa/wntr/actions/workflows/build_deploy_pages.yml)
