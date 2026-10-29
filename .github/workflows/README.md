@@ -1,5 +1,6 @@
 # GitHub Actions workflows
 
+- **`check_ward.yml`** — WARD formatting, lint, unit tests, and a short simulation on Ubuntu with Python 3.10 and uv. Runs on pushes outside `main` and PRs targeting `dev_f26_wntrwardv1`.
 - **`quick_test.yml`** — Fast checks on every push/PR (all branches): editable install on Ubuntu with Python 3.13, pytest and doctests excluding slow and extension tests, with a coverage floor.
 - **`test_core.yml`** — Full CI on `main`: editable install across OS and Python versions, coverage matrix, combined report, and Coveralls upload; also runs on a monthly schedule.
 - **`test_extensions.yml`** — Extension-only tests on every push/PR (all branches): Ubuntu matrix over supported Python versions.

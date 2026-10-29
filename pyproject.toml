@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wntr"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dynamic = ["version", "description", "readme", "authors", "license", "urls", "dependencies", "optional-dependencies"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 
 [tool.pytest.ini_options]
-markers = ["time_consuming:excluded from ci quick test", "extensions:included only in extensions ci"]
+markers = ["time_consuming:excluded from ci quick test", "extensions:included only in extensions ci", "simulation:small WARD simulation checks"]
 addopts = "--doctest-modules"
+
+[tool.ruff]
+include = ["ward/**/*.py", "tests/**/*.py"]

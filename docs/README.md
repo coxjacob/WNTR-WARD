@@ -12,12 +12,12 @@ Install uv and Git, then run:
 ```powershell
 git clone https://github.com/coxjacob/WNTR-WARD.git
 cd WNTR-WARD
-uv sync --locked --python 3.11
+uv sync --locked --python 3.10
 uv run --locked python -m ward
 uv run --locked python -m pytest tests
 ```
 
-Python 3.11 is the minimum supported version. WNTR is version 1.5.0 in this
+Python 3.10 is the minimum supported version. WNTR is version 1.5.0 in this
 repository. Its core dependencies are NumPy, SciPy, NetworkX, pandas, and
 Matplotlib; uv.lock records exact versions for repeatable installation.
 Commit dependency changes together with the updated lockfile.
@@ -69,3 +69,18 @@ status. API and database behavior will be implemented in their own tasks.
 
 Use test-first development: add a test for the intended behavior, run it and
 confirm the expected failure, implement the change, then rerun relevant tests.
+
+## Project checks
+
+Run these commands from the repository directory after `uv sync --locked`.
+GitHub runs the same checks on pushes outside main and PRs targeting the dev branch.
+
+| Check | Command |
+| --- | --- |
+| Formatting | `uv run --locked ruff format --check ward tests` |
+| Common code mistakes | `uv run --locked ruff check ward tests` |
+| Unit tests | `uv run --locked python -m pytest tests -m "not simulation"` |
+| Simulation test | `uv run --locked python -m pytest tests -m simulation` |
+
+Fix formatting with `uv run --locked ruff format ward tests`. Application checks
+are separate from inherited WNTR tests. The simulation test uses bundled Net1.
