@@ -73,7 +73,7 @@ confirm the expected failure, implement the change, then rerun relevant tests.
 ## Project checks
 
 Run these commands from the repository directory after `uv sync --locked`.
-GitHub runs the same checks on pushes outside main and PRs targeting the dev branch.
+GitHub runs the same checks on PRs targeting `dev_f26_wntrwardv1`.
 
 | Check | Command |
 | --- | --- |
