@@ -8,6 +8,11 @@ def load_test_network():
     return wntr.network.WaterNetworkModel(str(network_path))
 
 
+def run_simulation(network, output_prefix):
+    simulator = wntr.sim.EpanetSimulator(network)
+    return simulator.run_sim(file_prefix=str(output_prefix), convergence_error=True)
+
+
 def check_setup():
     network = load_test_network()
     print(f"WNTR version: {wntr.__version__}")

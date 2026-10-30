@@ -1,0 +1,34 @@
+# Runs WARD formatting, code checks, and tests before changes are merged. 
+# This makes it to where tests automatically run on each PR.
+
+name: WARD checks
+
+on:
+  pull_request:
+    branches: [dev_f26_wntrwardv1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: WARD checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: '0.12.3'
+          python-version: '3.10'
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Check formatting
+        run: uv run --locked ruff format --check ward tests
+      - name: Check code
+        run: uv run --locked ruff check ward tests
+      - name: Run unit tests
+        run: uv run --locked python -m pytest tests -m "not simulation"
+      - name: Run simulation test
+        run: uv run --locked python -m pytest tests -m simulation
