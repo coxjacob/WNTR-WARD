@@ -66,24 +66,30 @@ def run_simulation(network, output_prefix):
     return simulator.run_sim(file_prefix=str(output_prefix), convergence_error=True)
 
 
-class _PumpStatusAction(BaseControlAction): # wrap a normal pump status action so it pauses during the outage
-    def __init__(self, action, network, start_time, end_time): # store original action, simulation model, and outage window
+# wrap a normal pump status action so it pauses during the outage
+class _PumpStatusAction(BaseControlAction):
+    # store original action, simulation model, and outage window
+    def __init__(self, action, network, start_time, end_time):
         super().__init__()
         self.action = action
         self.network = network
         self.start_time = start_time
         self.end_time = end_time
 
-    def requires(self): # keep the original action's model dependencies
+    # keep the original action's model dependencies
+    def requires(self):
         return self.action.requires()
 
-    def target(self): # report the same pump and status attribute as the original action
+    # report the same pump and status attribute as the original action
+    def target(self):
         return self.action.target()
 
-    def __str__(self): # keep the original action's description for logging
+    # keep the original action's description for logging
+    def __str__(self):
         return str(self.action)
 
-    def run_control_action(self): # run the original action outside the outage window and notify the simulator of the update
+    # run the original action outside the outage window and notify the simulator of the update
+    def run_control_action(self):
         if not self.start_time < self.network.sim_time <= self.end_time:
             self.action.run_control_action()
             self.notify()
@@ -134,7 +140,8 @@ def run_pump_attack(
     end_time = start_time + scenario.timing.duration_sec
     pump = network.get_link(pump_name)
 
-    def guard_pump_status(actions): # wrap only actions that change the selected pump's status
+    # wrap only actions that change the selected pump's status
+    def guard_pump_status(actions):
         return [
             _PumpStatusAction(action, network, start_time, end_time)
             if action.target() == (pump, "status")
@@ -142,7 +149,8 @@ def run_pump_attack(
             for action in actions
         ]
 
-    for _, control in network.controls(): # apply the guard to matching actions in both branchs of each existing control
+    # apply the guard to matching actions in both branches of each existing control
+    for _, control in network.controls():
         if any(action.target() == (pump, "status") for action in control.actions()):
             control.update_then_actions(guard_pump_status(control._then_actions))
             control.update_else_actions(guard_pump_status(control._else_actions))
