@@ -96,6 +96,7 @@ class _PumpStatusAction(BaseControlAction):
             self.action.run_control_action()
             self.notify()
 
+
 # load requested scenario or default to the bundled pump outage scenario if none is provided
 def _load_pump_scenario(scenario_path):
     if scenario_path is None:
@@ -103,6 +104,7 @@ def _load_pump_scenario(scenario_path):
             Path(__file__).resolve().parent / "scenarios" / "pump_poweroff_basic.json"
         )
     return WaterScenario.load_from_json(Path(scenario_path))
+
 
 # check the scenario uses a supported pump outage type and targets one component
 def _validate_pump_scenario(scenario):
@@ -115,6 +117,7 @@ def _validate_pump_scenario(scenario):
         raise ValueError(
             "A pump attack scenario must specify exactly one target component"
         )
+
 
 # schedule outage, prevent normal controls from reopening the pump mid-outage
 def _apply_pump_outage(network, scenario):
@@ -191,8 +194,9 @@ def run_pump_attack(
     print(f"Simulation results written to: {output_path.resolve()}")
     return results
 
+
 # run one simulation, collect results, and return a dictionary with the results and metadata
-def _run_paired_case(network, scenario=None): 
+def _run_paired_case(network, scenario=None):
     settings = network.options.to_dict()
     started = perf_counter()
     results = None
@@ -223,8 +227,9 @@ def _run_paired_case(network, scenario=None):
         else {metric: frame.copy() for metric, frame in results.link.items()},
     }
 
+
 # run the baseline and pump outage with matching settings so that the results can be compared
-def run_paired_simulations(scenario_path, network_path, *, attack_first=False): 
+def run_paired_simulations(scenario_path, network_path, *, attack_first=False):
     scenario = _load_pump_scenario(scenario_path)
     _validate_pump_scenario(scenario)
     baseline = wntr.network.WaterNetworkModel(str(network_path))
