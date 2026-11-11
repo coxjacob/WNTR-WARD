@@ -1,7 +1,16 @@
+import json
+from importlib.resources import files
+
 import numpy as np
 import pytest
+import wntr
 
-from ward.simulation import load_ctown, load_test_network, run_simulation
+from ward.simulation import (
+    load_ctown,
+    load_test_network,
+    run_pump_attack,
+    run_simulation,
+)
 from wntr.epanet.exceptions import ENSyntaxError
 
 
@@ -51,3 +60,74 @@ def test_load_ctown_malformed_file(tmp_path):
 
     with pytest.raises(ENSyntaxError):
         load_ctown(malformed_file)
+
+
+@pytest.mark.simulation
+def test_pump_attack_closes_pump_during_scenario_window(tmp_path):
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": "pump-window-test",
+        "name": "Pump outage timing test",
+        "attack_type": "pump_off",
+        "model_id": "net1",
+        "target_components": ["9"],
+        "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+        "parameters": {},
+    }
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    results = run_pump_attack(
+        scenario_path=scenario_path,
+        network_path=network_path,
+        output_path=tmp_path / "results.csv",
+    )
+
+    pump_status = results.link["status"]["9"]
+    # WNTR evaluates SimTimeCondition boundaries at hydraulic timesteps.
+    # The pump is open at the start boundary, closed during the outage, and
+    # reopened at the first timestep after its end boundary.
+    assert pump_status.loc[3600] == 1
+    assert pump_status.loc[7200] == 0
+    assert pump_status.loc[10800] == 1
+    assert (tmp_path / "results.csv").is_file()
+
+
+@pytest.mark.simulation
+def test_pump_attack_changes_pressure_vs_normal_run(tmp_path):
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": "pump-pressure-test",
+        "name": "Pump outage pressure test",
+        "attack_type": "pump_off",
+        "model_id": "net1",
+        "target_components": ["9"],
+        "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+        "parameters": {},
+    }
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    # Run the same network without an outage to get the normal pressure series.
+    baseline_network = wntr.network.WaterNetworkModel(str(network_path))
+    baseline_results = wntr.sim.WNTRSimulator(baseline_network).run_sim()
+
+    # The attack function loads a fresh copy of the same network and applies
+    # only the pump outage described in the scenario JSON.
+    attack_results = run_pump_attack(
+        scenario_path=scenario_path,
+        network_path=network_path,
+        output_path=tmp_path / "attack_results.csv",
+    )
+
+    baseline_pressure = baseline_results.node["pressure"]
+    attack_pressure = attack_results.node["pressure"]
+    common_times = baseline_pressure.index.intersection(attack_pressure.index)
+    pressure_difference = (
+        attack_pressure.loc[common_times] - baseline_pressure.loc[common_times]
+    ).loc[3600:7200]
+
+    # A 1 mm head difference filters out negligible floating-point noise.
+    assert (pressure_difference.abs() > 0.001).to_numpy().any()

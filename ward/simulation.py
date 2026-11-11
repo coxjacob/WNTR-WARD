@@ -112,7 +112,12 @@ def run_pump_attack(
     start_time = scenario.timing.start_time_sec
     end_time = start_time + scenario.timing.duration_sec
     pump = network.get_link(pump_name)
-    pump.add_outage(network, start_time, end_time)
+    pump.add_outage(
+        network,
+        start_time,
+        end_time,
+        add_after_outage_rule=True,
+    )
 
     # Keep the model's configured duration unless it ends before the outage.
     network.options.time.duration = max(network.options.time.duration, end_time)
