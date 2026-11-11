@@ -3,8 +3,8 @@ from importlib.resources import files
 
 import numpy as np
 import pytest
-import wntr
 
+import wntr
 from ward.simulation import (
     load_ctown,
     load_test_network,
@@ -134,7 +134,9 @@ def test_pump_attack_changes_pressure_vs_normal_run(tmp_path):
 
 
 @pytest.mark.simulation
-def test_pump_attack_results_are_identical_across_three_runs(tmp_path):  # tests repeatability of simulation results up to 1e-12 tolerance, slight differences will exist beyond this
+def test_pump_attack_results_are_identical_across_three_runs(
+    tmp_path,
+):  # tests repeatability of simulation results up to 1e-12 tolerance, slight differences will exist beyond this
     scenario = {
         "schema_version": "1.0",
         "scenario_id": "pump-repeatability-test",

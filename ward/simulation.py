@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pandas as pd
+
 import wntr
 
 from .scenario import WaterScenario
@@ -81,9 +82,7 @@ def run_pump_attack(
     """
     if scenario_path is None:
         scenario_path = (
-            Path(__file__).resolve().parent
-            / "scenarios"
-            / "pump_poweroff_basic.json"
+            Path(__file__).resolve().parent / "scenarios" / "pump_poweroff_basic.json"
         )
     scenario_path = Path(scenario_path)
     scenario = WaterScenario.load_from_json(scenario_path)
@@ -105,9 +104,7 @@ def run_pump_attack(
 
     pump_name = scenario.target_components[0]
     if pump_name not in network.pump_name_list:
-        raise ValueError(
-            f"Target {pump_name!r} is not a pump in the selected network"
-        )
+        raise ValueError(f"Target {pump_name!r} is not a pump in the selected network")
 
     start_time = scenario.timing.start_time_sec
     end_time = start_time + scenario.timing.duration_sec
