@@ -131,3 +131,48 @@ def test_pump_attack_changes_pressure_vs_normal_run(tmp_path):
 
     # A 1 mm head difference filters out negligible floating-point noise.
     assert (pressure_difference.abs() > 0.001).to_numpy().any()
+
+
+@pytest.mark.simulation
+def test_pump_attack_results_are_identical_across_three_runs(tmp_path):  # tests repeatability of simulation results up to 1e-12 tolerance, slight differences will exist beyond this
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": "pump-repeatability-test",
+        "name": "Repeatable pump outage test",
+        "attack_type": "pump_off",
+        "model_id": "net1",
+        "target_components": ["9"],
+        "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+        "parameters": {},
+    }
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    results = [
+        run_pump_attack(
+            scenario_path=scenario_path,
+            network_path=network_path,
+            output_path=tmp_path / f"run_{run_number}.csv",
+        )
+        for run_number in range(3)
+    ]
+
+    first_result = results[0]
+    for result in results[1:]:
+        assert result.node.keys() == first_result.node.keys()
+        assert result.link.keys() == first_result.link.keys()
+        for metric, first_frame in first_result.node.items():
+            np.testing.assert_allclose(
+                first_frame.to_numpy(),
+                result.node[metric].to_numpy(),
+                rtol=0,
+                atol=1e-12,
+            )
+        for metric, first_frame in first_result.link.items():
+            np.testing.assert_allclose(
+                first_frame.to_numpy(),
+                result.link[metric].to_numpy(),
+                rtol=0,
+                atol=1e-12,
+            )
