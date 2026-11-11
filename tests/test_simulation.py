@@ -1,5 +1,6 @@
 import json
 from importlib.resources import files
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -92,6 +93,44 @@ def test_pump_attack_closes_pump_during_scenario_window(tmp_path):
     assert pump_status.loc[7200] == 0
     assert pump_status.loc[10800] == 1
     assert (tmp_path / "results.csv").is_file()
+
+
+@pytest.mark.simulation
+def test_ctown_controls_cannot_reopen_pump_during_outage(tmp_path):
+    network_path = Path(__file__).resolve().parents[1] / "examples/networks/CTOWN.inp"
+    results = run_pump_attack(
+        network_path=network_path,
+        output_path=tmp_path / "results.csv",
+    )
+
+    pump_flow = results.link["flowrate"]["PU1"]
+    assert pump_flow.loc[3600] > 0
+    assert (pump_flow.loc[4500:10800] == 0).all()
+    assert pump_flow.loc[11700] > 0
+
+
+@pytest.mark.parametrize("target", ["missing-pump", "10"])
+def test_pump_attack_rejects_invalid_target(tmp_path, target):
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": "invalid-target",
+        "name": "Invalid pump target",
+        "attack_type": "pump_off",
+        "model_id": "net1",
+        "target_components": [target],
+        "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+        "parameters": {},
+    }
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    with pytest.raises(ValueError, match=f"Target '{target}' is not a pump"):
+        run_pump_attack(
+            scenario_path=scenario_path,
+            network_path=network_path,
+            output_path=tmp_path / "results.csv",
+        )
 
 
 @pytest.mark.simulation
