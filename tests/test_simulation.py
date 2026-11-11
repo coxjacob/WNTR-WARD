@@ -1,3 +1,4 @@
+import csv
 import json
 from importlib.resources import files
 from pathlib import Path
@@ -6,6 +7,7 @@ import numpy as np
 import pytest
 
 import wntr
+from ward import simulation
 from ward.simulation import (
     load_ctown,
     load_test_network,
@@ -13,6 +15,63 @@ from ward.simulation import (
     run_simulation,
 )
 from wntr.epanet.exceptions import ENSyntaxError
+
+
+@pytest.mark.simulation
+def test_paired_runs_match_when_run_order_is_reversed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": "paired-run",
+        "name": "Paired run test",
+        "attack_type": "pump_off",
+        "model_id": "net1",
+        "target_components": ["9"],
+        "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+        "parameters": {},
+    }
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+    forward = simulation.run_paired_simulations(scenario_path, network_path)
+    reverse = simulation.run_paired_simulations(
+        scenario_path, network_path, attack_first=True
+    )
+
+    assert forward["baseline"]["settings"] == forward["attack"]["settings"]
+    assert forward["baseline"]["simulator"] == "WNTRSimulator"
+    assert forward["baseline"]["wntr_version"] == wntr.__version__
+    assert list(tmp_path.iterdir()) == [scenario_path]
+    assert forward["baseline"]["link"]["status"].loc[7200, "9"] == 1
+    assert forward["attack"]["link"]["status"].loc[7200, "9"] == 0
+    for case in ("baseline", "attack"):
+        assert forward[case]["converged"]
+        assert forward[case]["failure"] is None
+        for component in ("node", "link"):
+            for metric, frame in forward[case][component].items():
+                np.testing.assert_allclose(
+                    frame, reverse[case][component][metric], rtol=0, atol=1e-12
+                )
+
+    run_pump_attack(scenario_path, network_path)
+    with (tmp_path / "paired-run_results.csv").open(newline="") as output:
+        rows = list(csv.DictReader(output))
+
+    assert list(rows[0]) == [
+        "time_sec",
+        *[f"node_pressure_{name}" for name in forward["attack"]["node"]["pressure"]],
+        *[f"link_flowrate_{name}" for name in forward["attack"]["link"]["flowrate"]],
+    ]
+    assert [int(row["time_sec"]) for row in rows] == list(
+        forward["attack"]["node"]["pressure"].index
+    )
+    np.testing.assert_allclose(
+        [float(row["link_flowrate_9"]) for row in rows],
+        forward["attack"]["link"]["flowrate"]["9"],
+        rtol=0,
+        atol=1e-12,
+    )
 
 
 @pytest.mark.simulation
@@ -131,6 +190,14 @@ def test_pump_attack_rejects_invalid_target(tmp_path, target):
             network_path=network_path,
             output_path=tmp_path / "results.csv",
         )
+
+    paired = simulation.run_paired_simulations(scenario_path, network_path)
+    assert paired["baseline"]["converged"]
+    assert not paired["attack"]["converged"]
+    assert paired["attack"]["failure"] == {
+        "type": "ValueError",
+        "message": f"Target '{target}' is not a pump in the selected network",
+    }
 
 
 @pytest.mark.simulation

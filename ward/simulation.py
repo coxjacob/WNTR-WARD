@@ -1,6 +1,8 @@
+import warnings
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 
 import pandas as pd
 
@@ -94,32 +96,16 @@ class _PumpStatusAction(BaseControlAction):
             self.action.run_control_action()
             self.notify()
 
-
-def run_pump_attack(
-    scenario_path=None,
-    network_path=None,
-    output_path=None,
-):
-    """Run one pump outage described by a WNTR-WARD scenario JSON file.
-
-    Provide ``network_path`` to select the EPANET INP file for the scenario's
-    ``model_id``. The model ID is descriptive metadata; this function does not
-    assume a model filename or maintain a model registry.
-
-    Results are written as one CSV containing node pressures and link
-    flowrates at each reported simulation time. The WNTR results object is
-    returned for further analysis.
-    """
+# load requested scenario or default to the bundled pump outage scenario if none is provided
+def _load_pump_scenario(scenario_path):
     if scenario_path is None:
         scenario_path = (
             Path(__file__).resolve().parent / "scenarios" / "pump_poweroff_basic.json"
         )
-    scenario_path = Path(scenario_path)
-    scenario = WaterScenario.load_from_json(scenario_path)
+    return WaterScenario.load_from_json(Path(scenario_path))
 
-    if network_path is None:
-        raise ValueError("network_path is required to select the scenario model")
-
+# check the scenario uses a supported pump outage type and targets one component
+def _validate_pump_scenario(scenario):
     if scenario.attack_type not in {"pump_off", "pump_failure"}:
         raise ValueError(
             f"run_pump_attack only supports pump_off/pump_failure scenarios; "
@@ -130,8 +116,8 @@ def run_pump_attack(
             "A pump attack scenario must specify exactly one target component"
         )
 
-    network = wntr.network.WaterNetworkModel(str(network_path))
-
+# schedule outage, prevent normal controls from reopening the pump mid-outage
+def _apply_pump_outage(network, scenario):
     pump_name = scenario.target_components[0]
     if pump_name not in network.pump_name_list:
         raise ValueError(f"Target {pump_name!r} is not a pump in the selected network")
@@ -162,7 +148,30 @@ def run_pump_attack(
         add_after_outage_rule=True,
     )
 
-    # Keep the model's configured duration unless it ends before the outage.
+
+def run_pump_attack(
+    scenario_path=None,
+    network_path=None,
+    output_path=None,
+):
+    """Run one pump outage described by a WNTR-WARD scenario JSON file.
+
+    Provide ``network_path`` to select the EPANET INP file for the scenario's
+    ``model_id``. The model ID is descriptive metadata; this function does not
+    assume a model filename or maintain a model registry.
+
+    Results are written as one CSV containing node pressures and link
+    flowrates at each reported simulation time. The WNTR results object is
+    returned for further analysis.
+    """
+    scenario = _load_pump_scenario(scenario_path)
+    if network_path is None:
+        raise ValueError("network_path is required to select the scenario model")
+
+    _validate_pump_scenario(scenario)
+    network = wntr.network.WaterNetworkModel(str(network_path))
+    _apply_pump_outage(network, scenario)
+    end_time = scenario.timing.start_time_sec + scenario.timing.duration_sec
     network.options.time.duration = max(network.options.time.duration, end_time)
 
     simulator = wntr.sim.WNTRSimulator(network)
@@ -181,6 +190,54 @@ def run_pump_attack(
 
     print(f"Simulation results written to: {output_path.resolve()}")
     return results
+
+# run one simulation, collect results, and return a dictionary with the results and metadata
+def _run_paired_case(network, scenario=None): 
+    settings = network.options.to_dict()
+    started = perf_counter()
+    results = None
+    failure = None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            if scenario is not None:
+                _apply_pump_outage(network, scenario)
+            results = wntr.sim.WNTRSimulator(network).run_sim(convergence_error=True)
+        except (RuntimeError, ValueError, ArithmeticError) as error:
+            failure = {"type": type(error).__name__, "message": str(error)}
+
+    return {
+        "simulator": "WNTRSimulator",
+        "wntr_version": wntr.__version__,
+        "settings": settings,
+        "elapsed_seconds": perf_counter() - started,
+        "converged": results is not None,
+        "warnings": [str(warning.message) for warning in caught],
+        "failure": failure,
+        "node": {}
+        if results is None
+        else {metric: frame.copy() for metric, frame in results.node.items()},
+        "link": {}
+        if results is None
+        else {metric: frame.copy() for metric, frame in results.link.items()},
+    }
+
+# run the baseline and pump outage with matching settings so that the results can be compared
+def run_paired_simulations(scenario_path, network_path, *, attack_first=False): 
+    scenario = _load_pump_scenario(scenario_path)
+    _validate_pump_scenario(scenario)
+    baseline = wntr.network.WaterNetworkModel(str(network_path))
+    attack = wntr.network.WaterNetworkModel(str(network_path))
+    end_time = scenario.timing.start_time_sec + scenario.timing.duration_sec
+    duration = max(baseline.options.time.duration, end_time)
+    baseline.options.time.duration = duration
+    attack.options.time.duration = duration
+
+    cases = [("baseline", baseline, None), ("attack", attack, scenario)]
+    if attack_first:
+        cases.reverse()
+    return {name: _run_paired_case(network, outage) for name, network, outage in cases}
 
 
 def check_setup():
