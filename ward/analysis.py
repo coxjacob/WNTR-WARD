@@ -242,9 +242,11 @@ def identify_affected_nodes(
         # before vs after impact
         reasons: list[str] = []
         if attack_caused_new_low_pressure:
+            crossing_time = a_p_series[new_low_mask].idxmin()
             reasons.append(
                 f"Pressure dropped below {active_thresholds.min_pressure_psi:.1f} psi "
-                f"(to {a_min_psi:.2f} psi) from compliant baseline ({b_min_psi:.2f} psi)."
+                f"(to {a_p_series.loc[crossing_time]:.2f} psi) from compliant baseline "
+                f"({b_p_series.loc[crossing_time]:.2f} psi)."
             )
         if baseline_had_low_pressure and (
             significant_pressure_drop or service_shortfall
@@ -292,10 +294,10 @@ def identify_affected_nodes(
         }
 
         if len(reasons) > 0:
-            if baseline_had_low_pressure:
-                record["impact_category"] = "worsened_pre_existing_low_pressure"
-            elif attack_caused_new_low_pressure:
+            if attack_caused_new_low_pressure:
                 record["impact_category"] = "attack_induced_low_pressure"
+            elif baseline_had_low_pressure:
+                record["impact_category"] = "worsened_pre_existing_low_pressure"
             else:
                 record["impact_category"] = "attack_induced_degradation"
             affected_nodes.append(record)

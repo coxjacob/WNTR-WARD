@@ -28,7 +28,7 @@
 
 ## 3. Distinguishing Pre-Existing Issues vs. Attack-Caused Impacts
 
-1. **`attack_induced_low_pressure`:** Baseline pressure stayed $\ge 20.0\text{ psi}$ throughout the window, and attack pressure dropped $< 20.0\text{ psi}$.
+1. **`attack_induced_low_pressure`:** At any timestep in the window, baseline pressure was $\ge 20.0\text{ psi}$ and attack pressure was $< 20.0\text{ psi}$. This category takes priority if the baseline also had low pressure at another timestep.
 2. **`worsened_pre_existing_low_pressure`:** Node was already $< 20.0\text{ psi}$ in the baseline simulation, **and** the attack caused an additional drop $\ge 5.0\text{ psi}$ or reduced demand delivery below $95\%$.
 3. **`attack_induced_degradation`:** Pressure remained $\ge 20.0\text{ psi}$, but dropped by $\ge 5.0\text{ psi}$ or suffered a $< 95\%$ demand delivery shortfall.
 4. **`pre_existing_low_pressure_unchanged` (Excluded from `affected_nodes`):** Node was already $< 20.0\text{ psi}$ in baseline and experienced $< 5.0\text{ psi}$ additional drop and $\ge 95\%$ demand delivery. Returned separately under `pre_existing_only_nodes` so baseline network deficiencies are not misattributed to the cyber attack.

@@ -115,6 +115,20 @@ def test_hand_checked_thresholds_below_at_and_above():
     assert pre_only_ids == ["N_pre_unchanged"]
 
 
+def test_new_low_pressure_with_pre_existing_low_pressure():
+    paired = _make_paired_fixture(
+        {"J1": [18.0, 21.0]}, {"J1": [18.0, 19.0]}, times_sec=[3600.0, 7200.0]
+    )
+
+    (node,) = identify_affected_nodes(paired)["affected_nodes"]
+
+    assert node["impact_category"] == "attack_induced_low_pressure"
+    assert node["pre_existing_low_pressure"] is True
+    assert node["reasons"] == [
+        "Pressure dropped below 20.0 psi (to 19.00 psi) from compliant baseline (21.00 psi)."
+    ]
+
+
 def test_equal_ranking_tie_breaking_is_deterministic():
     """Verify tie-breaking order: drop desc -> duration desc -> min pressure asc -> node_id asc."""
     paired = _make_paired_fixture(
