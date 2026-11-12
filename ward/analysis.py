@@ -262,8 +262,8 @@ def identify_affected_nodes(
             and not baseline_had_low_pressure
         ):
             reasons.append(
-                f"Attack reduced pressure by {max_drop_psi:.2f} psi (>= {active_thresholds.pressure_drop_psi:.1f} psi "
-                f"drop threshold), from {b_min_psi:.2f} psi to {a_min_psi:.2f} psi."
+                f"Attack reduced pressure by up to {max_drop_psi:.2f} psi "
+                f"(>= {active_thresholds.pressure_drop_psi:.1f} psi drop threshold)."
             )
         if service_shortfall:
             reasons.append(
