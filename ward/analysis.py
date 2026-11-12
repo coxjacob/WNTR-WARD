@@ -213,7 +213,10 @@ def identify_affected_nodes(
         b_low_mask = b_p_series < active_thresholds.min_pressure_psi
         a_low_mask = a_p_series < active_thresholds.min_pressure_psi
         new_low_mask = (~b_low_mask) & a_low_mask
-        drop_exceeded_mask = drop_series_psi >= active_thresholds.pressure_drop_psi
+        # round to 9 decimal places to avoid floating point comparison issues
+        drop_exceeded_mask = (
+            drop_series_psi.round(9) >= active_thresholds.pressure_drop_psi
+        )
 
         baseline_had_low_pressure = bool(b_low_mask.any())
         attack_caused_new_low_pressure = bool(new_low_mask.any())
