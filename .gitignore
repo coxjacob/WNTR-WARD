@@ -105,3 +105,9 @@ wntr/sim/aml/*.dylib
 wntr/sim/network_isolation/*.so
 wntr/sim/network_isolation/*.dll
 wntr/sim/network_isolation/*.dylib
+
+# Local SQLite databases
+/data/
+*.sqlite
+*.sqlite3
+*.db
