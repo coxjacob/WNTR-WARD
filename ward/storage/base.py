@@ -1,4 +1,3 @@
-
 """Shared interface for WARD storage implementations."""
 
 from typing import Any, Protocol
@@ -25,15 +24,11 @@ class Storage(Protocol):
         """Retrieve a scenario by ID."""
         ...
 
-    def list_scenarios(
-        self, model_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def list_scenarios(self, model_id: str | None = None) -> list[dict[str, Any]]:
         """List scenarios, optionally filtered by model."""
         ...
 
-    def update_scenario(
-        self, scenario_id: str, scenario: dict[str, Any]
-    ) -> None:
+    def update_scenario(self, scenario_id: str, scenario: dict[str, Any]) -> None:
         """Update an existing scenario without changing its ID."""
         ...
 

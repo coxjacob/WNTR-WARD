@@ -125,11 +125,13 @@ def test_data_persists_after_reopening_database(tmp_path):
     # Create the database and save data.
     db = SQLiteStorage(db_path)
 
-    db.register_model({
-        "model_id": "ctown",
-        "name": "C-Town",
-        "description": "Test network",
-    })
+    db.register_model(
+        {
+            "model_id": "ctown",
+            "name": "C-Town",
+            "description": "Test network",
+        }
+    )
 
     scenario = {
         "schema_version": "1.0",
@@ -211,11 +213,13 @@ def test_delete_scenario(tmp_path):
     db_path = tmp_path / "delete_test.sqlite"
     db = SQLiteStorage(db_path)
 
-    db.register_model({
-        "model_id": "ctown",
-        "name": "C-Town",
-        "description": "Test network",
-    })
+    db.register_model(
+        {
+            "model_id": "ctown",
+            "name": "C-Town",
+            "description": "Test network",
+        }
+    )
 
     scenario = {
         "schema_version": "1.0",

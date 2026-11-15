@@ -1,4 +1,3 @@
-
 """In-memory implementation of WARD storage."""
 
 import math
@@ -62,9 +61,7 @@ class MemoryStorage:
 
         if model_id is not None:
             scenarios = [
-                scenario
-                for scenario in scenarios
-                if scenario["model_id"] == model_id
+                scenario for scenario in scenarios if scenario["model_id"] == model_id
             ]
 
         return deepcopy(list(scenarios))
@@ -87,13 +84,8 @@ class MemoryStorage:
         if scenario_id not in self.scenarios:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
-        if any(
-            run["scenario_id"] == scenario_id
-            for run in self.runs.values()
-        ):
-            raise ValueError(
-                "Cannot delete a scenario with historical runs"
-            )
+        if any(run["scenario_id"] == scenario_id for run in self.runs.values()):
+            raise ValueError("Cannot delete a scenario with historical runs")
 
         del self.scenarios[scenario_id]
 
@@ -121,9 +113,7 @@ class MemoryStorage:
             raise ValueError(f"Invalid run status: {status}")
 
         if status not in {"pending", "running"}:
-            raise ValueError(
-                "A new run must start as pending or running"
-            )
+            raise ValueError("A new run must start as pending or running")
 
         self.runs[run_id] = deepcopy(run)
 
@@ -142,9 +132,7 @@ class MemoryStorage:
             return None
 
         result = deepcopy(run)
-        result["status_history"] = deepcopy(
-            self.status_history[run_id]
-        )
+        result["status_history"] = deepcopy(self.status_history[run_id])
 
         return result
 
@@ -181,8 +169,7 @@ class MemoryStorage:
 
         if new_status not in ALLOWED_TRANSITIONS[current_status]:
             raise ValueError(
-                f"Invalid status transition: "
-                f"{current_status} -> {new_status}"
+                f"Invalid status transition: {current_status} -> {new_status}"
             )
 
         self.runs[run_id]["status"] = new_status
@@ -195,7 +182,6 @@ class MemoryStorage:
             }
         )
 
-
     def save_run_summary(self, run_id, summary):
         """Save summary information for a simulation run."""
         if run_id not in self.runs:
@@ -205,12 +191,10 @@ class MemoryStorage:
 
         self.run_summaries[run_id] = deepcopy(summary)
 
-
     def get_run_summary(self, run_id):
         """Retrieve summary information for a simulation run."""
         summary = self.run_summaries.get(run_id)
         return deepcopy(summary) if summary is not None else None
-
 
     def save_run_details(self, run_id, results):
         """Save individual measurements for a simulation run."""
@@ -231,22 +215,23 @@ class MemoryStorage:
                             if not math.isfinite(float(value)):
                                 continue
 
-                            records.append({
-                                "case_name": case_name,
-                                "component_type": component_type,
-                                "component_id": str(component_id),
-                                "metric_name": metric_name,
-                                "time_seconds": float(time_seconds),
-                                "value": float(value),
-                                "unit": "",
-                            })
+                            records.append(
+                                {
+                                    "case_name": case_name,
+                                    "component_type": component_type,
+                                    "component_id": str(component_id),
+                                    "metric_name": metric_name,
+                                    "time_seconds": float(time_seconds),
+                                    "value": float(value),
+                                    "unit": "",
+                                }
+                            )
 
         self.run_details[run_id] = records
 
     def get_run_details(self, run_id):
         """Retrieve individual measurements for a simulation run."""
         return deepcopy(self.run_details.get(run_id, []))
-
 
     def close(self):
         """Clear all stored data."""

@@ -1,4 +1,3 @@
-
 """SQLite implementation of WARD storage."""
 
 import json
@@ -14,20 +13,14 @@ class SQLiteStorage:
     def __init__(self, database_path: str | Path):
         self.database_path = Path(database_path)
 
-        
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
 
-        
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
 
-        
         self.connection.execute("PRAGMA foreign_keys = ON")
 
-
         self._apply_migrations()
-
-
 
     def register_model(self, model: dict[str, Any]) -> None:
         """Register a water network model."""
@@ -48,10 +41,7 @@ class SQLiteStorage:
 
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise ValueError(
-                f"Model already exists: {model['model_id']}"
-            ) from exc
-
+            raise ValueError(f"Model already exists: {model['model_id']}") from exc
 
     def get_model(self, model_id: str) -> dict[str, Any] | None:
         """Retrieve a model by ID."""
@@ -66,7 +56,6 @@ class SQLiteStorage:
         ).fetchone()
 
         return dict(row) if row is not None else None
-
 
     def create_scenario(self, scenario: dict[str, Any]) -> None:
         """Create a scenario and store its definition as JSON."""
@@ -110,7 +99,6 @@ class SQLiteStorage:
             self.connection.rollback()
             raise
 
-
     def get_scenario(self, scenario_id: str) -> dict[str, Any] | None:
         """Retrieve a scenario and reconstruct its JSON definition."""
 
@@ -128,10 +116,7 @@ class SQLiteStorage:
 
         return json.loads(row["scenario_json"])
 
-    
-    def list_scenarios(
-        self, model_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def list_scenarios(self, model_id: str | None = None) -> list[dict[str, Any]]:
         """List scenarios, optionally filtered by model."""
 
         if model_id is None:
@@ -153,15 +138,9 @@ class SQLiteStorage:
                 (model_id,),
             ).fetchall()
 
-        return [
-            json.loads(row["scenario_json"])
-            for row in rows
-        ]
+        return [json.loads(row["scenario_json"]) for row in rows]
 
-
-    def update_scenario(
-        self, scenario_id: str, scenario: dict[str, Any]
-    ) -> None:
+    def update_scenario(self, scenario_id: str, scenario: dict[str, Any]) -> None:
         """Update an existing scenario."""
 
         if self.get_scenario(scenario_id) is None:
@@ -200,7 +179,6 @@ class SQLiteStorage:
             self.connection.rollback()
             raise
 
-
     def delete_scenario(self, scenario_id: str) -> None:
         """Delete a scenario if no historical runs depend on it."""
 
@@ -219,10 +197,7 @@ class SQLiteStorage:
 
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise ValueError(
-                "Cannot delete a scenario with historical runs"
-            ) from exc
-
+            raise ValueError("Cannot delete a scenario with historical runs") from exc
 
     def save_run(self, run: dict[str, Any]) -> None:
         """Save a simulation run and its scenario snapshot."""
@@ -232,7 +207,6 @@ class SQLiteStorage:
         model_id = run["model_id"]
         status = run["status"]
 
-        
         existing = self.connection.execute(
             "SELECT run_id FROM runs WHERE run_id = ?",
             (run_id,),
@@ -241,13 +215,11 @@ class SQLiteStorage:
         if existing is not None:
             raise ValueError(f"Run already exists: {run_id}")
 
-        
         scenario = self.get_scenario(scenario_id)
 
         if scenario is None:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
-       
         if self.get_model(model_id) is None:
             raise KeyError(f"Model does not exist: {model_id}")
 
@@ -255,11 +227,8 @@ class SQLiteStorage:
             raise ValueError("Run model does not match scenario model")
 
         if status not in {"pending", "running"}:
-            raise ValueError(
-                "A new run must start as pending or running"
-            )
+            raise ValueError("A new run must start as pending or running")
 
-       
         scenario_snapshot = json.dumps(scenario)
 
         try:
@@ -287,7 +256,6 @@ class SQLiteStorage:
                 ),
             )
 
-            
             self.connection.execute(
                 """
                 INSERT INTO run_status_history (
@@ -307,7 +275,6 @@ class SQLiteStorage:
             self.connection.rollback()
             raise
 
-
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         """Retrieve a run, its scenario snapshot, and status history."""
 
@@ -325,12 +292,8 @@ class SQLiteStorage:
 
         run = dict(row)
 
-        
-        run["scenario_snapshot"] = json.loads(
-            run["scenario_snapshot"]
-        )
+        run["scenario_snapshot"] = json.loads(run["scenario_snapshot"])
 
-        
         history_rows = self.connection.execute(
             """
             SELECT previous_status, new_status, changed_at, details
@@ -341,12 +304,9 @@ class SQLiteStorage:
             (run_id,),
         ).fetchall()
 
-        run["status_history"] = [
-            dict(history_row) for history_row in history_rows
-        ]
+        run["status_history"] = [dict(history_row) for history_row in history_rows]
 
         return run
-
 
     def list_runs(
         self,
@@ -389,12 +349,9 @@ class SQLiteStorage:
 
         query += " ORDER BY created_at"
 
-        rows = self.connection.execute(
-            query, parameters
-        ).fetchall()
+        rows = self.connection.execute(query, parameters).fetchall()
 
         return [dict(row) for row in rows]
-
 
     def update_run_status(
         self,
@@ -477,18 +434,13 @@ class SQLiteStorage:
             self.connection.rollback()
             raise
 
-
-
     def _apply_migrations(self):
         """Apply database migrations that have not run yet."""
 
-        migration_folder = (
-            Path(__file__).resolve().parents[2] / "migrations"
-        )
+        migration_folder = Path(__file__).resolve().parents[2] / "migrations"
 
         migration_files = sorted(migration_folder.glob("*.sql"))
 
-        
         table_exists = self.connection.execute(
             """
             SELECT name
@@ -508,7 +460,6 @@ class SQLiteStorage:
         else:
             applied_versions = set()
 
-        
         for migration_file in migration_files:
             version = int(migration_file.stem.split("_", maxsplit=1)[0])
 
@@ -518,13 +469,10 @@ class SQLiteStorage:
             sql = migration_file.read_text(encoding="utf-8")
 
             try:
-                self.connection.executescript(
-                    f"BEGIN;\n{sql}\nCOMMIT;"
-                )
+                self.connection.executescript(f"BEGIN;\n{sql}\nCOMMIT;")
             except sqlite3.Error:
                 self.connection.rollback()
                 raise
-
 
     def save_run_summary(self, run_id: str, summary: dict[str, Any]) -> None:
         """Save simulation summary information as JSON."""
@@ -570,7 +518,6 @@ class SQLiteStorage:
             return None
 
         return json.loads(row["summary_json"])
-
 
     def save_run_details(self, run_id: str, results: dict[str, Any]) -> None:
         """Save individual node and link measurements for a simulation run."""
@@ -635,7 +582,6 @@ class SQLiteStorage:
             self.connection.rollback()
             raise
 
-
     def get_run_details(self, run_id: str) -> list[dict[str, Any]]:
         """Retrieve individual measurements for a simulation run."""
 
@@ -658,10 +604,8 @@ class SQLiteStorage:
         ).fetchall()
 
         return [dict(row) for row in rows]
-        
 
     def close(self) -> None:
         """Close the database connection."""
 
         self.connection.close()
-

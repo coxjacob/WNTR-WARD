@@ -131,9 +131,7 @@ def test_delete_missing_scenario(storage):
         storage.delete_scenario("missing_scenario")
 
 
-def test_save_and_get_run(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_save_and_get_run(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
 
@@ -147,9 +145,7 @@ def test_save_and_get_run(
     assert result["status"] == "pending"
 
 
-def test_run_status_transitions(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_run_status_transitions(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
     storage.save_run(sample_run)
@@ -175,9 +171,7 @@ def test_invalid_run_status_transition(
         storage.update_run_status("run_test_01", "pending")
 
 
-def test_run_status_history(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_run_status_history(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
     storage.save_run(sample_run)
@@ -194,9 +188,7 @@ def test_run_status_history(
     assert history[2]["new_status"] == "succeeded"
 
 
-def test_list_runs_with_filters(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_list_runs_with_filters(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
 
@@ -253,9 +245,7 @@ def test_missing_scenario_operations(storage):
         storage.delete_scenario("missing_scenario")
 
 
-def test_storage_returns_independent_copies(
-    storage, sample_model, sample_scenario
-):
+def test_storage_returns_independent_copies(storage, sample_model, sample_scenario):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
 
@@ -272,9 +262,7 @@ def test_storage_returns_independent_copies(
     assert original["target_components"] == ["PU1"]
 
 
-def test_save_and_get_run_summary(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_save_and_get_run_summary(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
     storage.save_run(sample_run)
@@ -302,9 +290,7 @@ def test_save_and_get_run_summary(
         storage.save_run_summary("run_test_01", summary)
 
 
-def test_save_and_get_run_details(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_save_and_get_run_details(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
     storage.save_run(sample_run)
@@ -354,9 +340,7 @@ def test_results_require_existing_run(storage):
         storage.save_run_details("missing_run", details)
 
 
-def test_duplicate_run_is_rejected(
-    storage, sample_model, sample_scenario, sample_run
-):
+def test_duplicate_run_is_rejected(storage, sample_model, sample_scenario, sample_run):
     storage.register_model(sample_model)
     storage.create_scenario(sample_scenario)
     storage.save_run(sample_run)
