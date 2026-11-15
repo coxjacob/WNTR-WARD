@@ -1,6 +1,7 @@
 
 """In-memory implementation of WARD storage."""
 
+import math
 from copy import deepcopy
 
 ALLOWED_STATUSES = {"pending", "running", "succeeded", "failed"}
@@ -21,6 +22,8 @@ class MemoryStorage:
         self.scenarios = {}
         self.runs = {}
         self.status_history = {}
+        self.run_summaries = {}
+        self.run_details = {}
 
     # Model operations
 
@@ -80,7 +83,7 @@ class MemoryStorage:
 
         self.scenarios[scenario_id] = deepcopy(scenario)
 
-    def delete_scenario(self, scenario_id):
+    def delete_scenario(self, scenario_id: str) -> None:
         if scenario_id not in self.scenarios:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
@@ -192,9 +195,64 @@ class MemoryStorage:
             }
         )
 
+
+    def save_run_summary(self, run_id, summary):
+        """Save summary information for a simulation run."""
+        if run_id not in self.runs:
+            raise KeyError(f"Run does not exist: {run_id}")
+        if run_id in self.run_summaries:
+            raise ValueError(f"Summary already exists for run: {run_id}")
+
+        self.run_summaries[run_id] = deepcopy(summary)
+
+
+    def get_run_summary(self, run_id):
+        """Retrieve summary information for a simulation run."""
+        summary = self.run_summaries.get(run_id)
+        return deepcopy(summary) if summary is not None else None
+
+
+    def save_run_details(self, run_id, results):
+        """Save individual measurements for a simulation run."""
+        if run_id not in self.runs:
+            raise KeyError(f"Run does not exist: {run_id}")
+        if run_id in self.run_details:
+            raise ValueError(f"Details already exist for run: {run_id}")
+
+        records = []
+
+        for case_name, case_results in results.items():
+            for component_type in ("node", "link"):
+                measurements = case_results.get(component_type, {})
+
+                for metric_name, frame in measurements.items():
+                    for time_seconds, row in frame.iterrows():
+                        for component_id, value in row.items():
+                            if not math.isfinite(float(value)):
+                                continue
+
+                            records.append({
+                                "case_name": case_name,
+                                "component_type": component_type,
+                                "component_id": str(component_id),
+                                "metric_name": metric_name,
+                                "time_seconds": float(time_seconds),
+                                "value": float(value),
+                                "unit": "",
+                            })
+
+        self.run_details[run_id] = records
+
+    def get_run_details(self, run_id):
+        """Retrieve individual measurements for a simulation run."""
+        return deepcopy(self.run_details.get(run_id, []))
+
+
     def close(self):
         """Clear all stored data."""
         self.models.clear()
         self.scenarios.clear()
         self.runs.clear()
         self.status_history.clear()
+        self.run_summaries.clear()
+        self.run_details.clear()

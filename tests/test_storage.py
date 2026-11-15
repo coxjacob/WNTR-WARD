@@ -1,5 +1,6 @@
 """Tests for WARD storage implementations."""
 
+import pandas as pd
 import pytest
 
 from ward.storage.memory import MemoryStorage
@@ -110,6 +111,24 @@ def test_delete_scenario(storage, sample_model, sample_scenario):
     storage.delete_scenario("scenario_test_01")
 
     assert storage.get_scenario("scenario_test_01") is None
+
+
+def test_cannot_delete_scenario_with_historical_runs(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    storage.save_run(sample_run)
+
+    with pytest.raises(ValueError, match="historical runs"):
+        storage.delete_scenario("scenario_test_01")
+
+    assert storage.get_scenario("scenario_test_01") is not None
+
+
+def test_delete_missing_scenario(storage):
+    with pytest.raises(KeyError, match="Scenario does not exist"):
+        storage.delete_scenario("missing_scenario")
 
 
 def test_save_and_get_run(
@@ -251,3 +270,96 @@ def test_storage_returns_independent_copies(
 
     assert original["name"] == "Test Pump Failure"
     assert original["target_components"] == ["PU1"]
+
+
+def test_save_and_get_run_summary(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    storage.save_run(sample_run)
+
+    summary = {
+        "baseline": {
+            "simulator": "WNTRSimulator",
+            "elapsed_seconds": 2.5,
+            "converged": True,
+        },
+        "attack": {
+            "simulator": "WNTRSimulator",
+            "elapsed_seconds": 3.1,
+            "converged": True,
+        },
+    }
+
+    storage.save_run_summary("run_test_01", summary)
+
+    result = storage.get_run_summary("run_test_01")
+
+    assert result == summary
+
+    with pytest.raises(ValueError, match="Summary already exists"):
+        storage.save_run_summary("run_test_01", summary)
+
+
+def test_save_and_get_run_details(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    storage.save_run(sample_run)
+
+    results = {
+        "baseline": {
+            "node": {
+                "pressure": pd.DataFrame(
+                    {"J1": [45.2, 44.9], "J2": [43.8, 43.5]},
+                    index=[0, 3600],
+                )
+            },
+            "link": {},
+        },
+        "attack": {
+            "node": {
+                "pressure": pd.DataFrame(
+                    {"J1": [45.2, 30.1], "J2": [43.8, 29.5]},
+                    index=[0, 3600],
+                )
+            },
+            "link": {},
+        },
+    }
+
+    storage.save_run_details("run_test_01", results)
+
+    details = storage.get_run_details("run_test_01")
+
+    assert len(details) == 8
+    assert details[0]["case_name"] == "baseline"
+    assert details[0]["component_type"] == "node"
+    assert details[0]["metric_name"] == "pressure"
+
+    with pytest.raises(ValueError, match="Details already exist"):
+        storage.save_run_details("run_test_01", results)
+
+
+def test_results_require_existing_run(storage):
+    summary = {"baseline": {"converged": True}}
+    details = {"baseline": {"node": {}, "link": {}}}
+
+    with pytest.raises(KeyError):
+        storage.save_run_summary("missing_run", summary)
+
+    with pytest.raises(KeyError):
+        storage.save_run_details("missing_run", details)
+
+
+def test_duplicate_run_is_rejected(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    storage.save_run(sample_run)
+
+    with pytest.raises(ValueError, match="Run already exists"):
+        storage.save_run(sample_run)

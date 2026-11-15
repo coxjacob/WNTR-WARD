@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS models (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-.
+
 CREATE TABLE IF NOT EXISTS scenarios (
     scenario_id TEXT PRIMARY KEY,
     model_id TEXT NOT NULL,
@@ -94,8 +94,20 @@ CREATE TABLE IF NOT EXISTS result_details (
         ON DELETE CASCADE,
 
     CHECK (case_name IN ('baseline', 'attack')),
-    CHECK (component_type IN ('node', 'link'))
+    CHECK (component_type IN ('node', 'link')),
+
+    UNIQUE (
+        run_id,
+        case_name,
+        component_type,
+        component_id,
+        metric_name,
+        time_seconds
+    )
 );
+
+CREATE INDEX IF NOT EXISTS idx_result_details_run
+ON result_details(run_id, case_name, component_type, metric_name);
 
 
 
