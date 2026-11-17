@@ -41,6 +41,15 @@ Application tests live in tests; inherited WNTR tests live in wntr/tests.
   and without the outage using matching settings. It returns both sets of
   results in memory for comparison.
 
+Both scenario simulation entry points save the scenario definition, run status,
+configuration, summary, and measurements to SQLite. The default database is
+`data/ward.sqlite` relative to the working directory. Set `WARD_DATABASE_PATH`
+to choose another file. Run metadata includes the network file path and SHA-256
+digest, and each run preserves its scenario snapshot. Failed simulations are
+recorded with failure details. Pass `storage=MemoryStorage()` to either function
+when testing without disk persistence. Storage connections opened by the
+simulation functions are closed before they return.
+
 ## Structure and responsibilities
 
 | Location | Purpose |

@@ -1,8 +1,12 @@
+import hashlib
+import os
 import warnings
+from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
+from uuid import uuid4
 
 import pandas as pd
 
@@ -10,6 +14,7 @@ import wntr
 from wntr.network.controls import BaseControlAction
 
 from .scenario import WaterScenario
+from .storage.sqlite import SQLiteStorage
 
 
 def load_test_network():
@@ -152,20 +157,85 @@ def _apply_pump_outage(network, scenario):
     )
 
 
+@contextmanager
+def _stored_run(scenario, network_path, storage):
+    owned = storage is None
+    if owned:
+        storage = SQLiteStorage(
+            os.environ.get("WARD_DATABASE_PATH", "data/ward.sqlite")
+        )
+    run_id = None
+    try:
+        definition = scenario.model_dump(mode="json")
+        if storage.get_model(scenario.model_id) is None:
+            storage.register_model(
+                {"model_id": scenario.model_id, "name": scenario.model_id}
+            )
+        if storage.get_scenario(scenario.scenario_id) is None:
+            storage.create_scenario(definition)
+        else:
+            storage.update_scenario(scenario.scenario_id, definition)
+        run_id = uuid4().hex
+        storage.save_run(
+            {
+                "run_id": run_id,
+                "scenario_id": scenario.scenario_id,
+                "model_id": scenario.model_id,
+                "status": "running",
+                "metadata": {
+                    "network_path": str(Path(network_path).resolve()),
+                    "network_sha256": hashlib.sha256(
+                        Path(network_path).read_bytes()
+                    ).hexdigest(),
+                    "wntr_version": wntr.__version__,
+                },
+            }
+        )
+        yield storage, run_id
+    except Exception as error:
+        if run_id is not None and storage.get_run(run_id) is not None:
+            storage.update_run_status(run_id, "failed", str(error))
+        raise
+    finally:
+        if owned:
+            storage.close()
+
+
+def _save_case_results(storage, run_id, results):
+    summary = {
+        name: {key: value for key, value in case.items() if key not in {"node", "link"}}
+        for name, case in results.items()
+    }
+    storage.save_run_summary(run_id, summary)
+    storage.save_run_details(run_id, results)
+    failures = [
+        str(case["failure"]) for case in results.values() if not case["converged"]
+    ]
+    storage.update_run_status(
+        run_id,
+        "failed" if failures else "succeeded",
+        "; ".join(failures) if failures else None,
+    )
+
+
 def run_pump_attack(
     scenario_path=None,
     network_path=None,
     output_path=None,
+    *,
+    storage=None,
 ):
     """Run one pump outage described by a WNTR-WARD scenario JSON file.
 
     Provide ``network_path`` to select the EPANET INP file for the scenario's
-    ``model_id``. The model ID is descriptive metadata; this function does not
-    assume a model filename or maintain a model registry.
+    ``model_id``. The model ID is registered in storage, and the run records
+    the selected network path and content digest.
 
     Results are written as one CSV containing node pressures and link
     flowrates at each reported simulation time. The WNTR results object is
-    returned for further analysis.
+    returned for further analysis. The scenario, run, and measurements are also
+    saved to SQLite at WARD_DATABASE_PATH (default data/ward.sqlite).
+    Pass storage to inject an implementation of the shared storage interface.
     """
     scenario = _load_pump_scenario(scenario_path)
     if network_path is None:
@@ -177,22 +247,38 @@ def run_pump_attack(
     end_time = scenario.timing.start_time_sec + scenario.timing.duration_sec
     network.options.time.duration = max(network.options.time.duration, end_time)
 
-    simulator = wntr.sim.WNTRSimulator(network)
-    results = simulator.run_sim(convergence_error=True)
+    with _stored_run(scenario, network_path, storage) as (saved, run_id):
+        simulator = wntr.sim.WNTRSimulator(network)
+        results = simulator.run_sim(convergence_error=True)
 
-    if output_path is None:
-        output_path = Path.cwd() / f"{scenario.scenario_id}_results.csv"
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path is None:
+            output_path = Path.cwd() / f"{scenario.scenario_id}_results.csv"
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pressure = results.node["pressure"].add_prefix("node_pressure_")
-    flowrate = results.link["flowrate"].add_prefix("link_flowrate_")
-    output = pd.concat([pressure, flowrate], axis=1)
-    output.index.name = "time_sec"
-    output.to_csv(output_path)
+        pressure = results.node["pressure"].add_prefix("node_pressure_")
+        flowrate = results.link["flowrate"].add_prefix("link_flowrate_")
+        output = pd.concat([pressure, flowrate], axis=1)
+        output.index.name = "time_sec"
+        output.to_csv(output_path)
 
-    print(f"Simulation results written to: {output_path.resolve()}")
-    return results
+        print(f"Simulation results written to: {output_path.resolve()}")
+        _save_case_results(
+            saved,
+            run_id,
+            {
+                "attack": {
+                    "simulator": "WNTRSimulator",
+                    "wntr_version": wntr.__version__,
+                    "settings": network.options.to_dict(),
+                    "converged": True,
+                    "failure": None,
+                    "node": results.node,
+                    "link": results.link,
+                }
+            },
+        )
+        return results
 
 
 # run one simulation, collect results, and return a dictionary with the results and metadata
@@ -229,7 +315,28 @@ def _run_paired_case(network, scenario=None):
 
 
 # run the baseline and pump outage with matching settings so that the results can be compared
-def run_paired_simulations(scenario_path, network_path, *, attack_first=False):
+def run_paired_simulations(
+    scenario_path, network_path, *, attack_first=False, storage=None
+):
+    """Run and persist a baseline and attack comparison.
+
+    Parameters
+    ----------
+    scenario_path : path-like
+        Versioned scenario JSON file.
+    network_path : path-like
+        EPANET network file matching the scenario model.
+    attack_first : bool, optional
+        Execute the attack before the baseline.
+    storage : Storage, optional
+        Inject storage for tests. By default use SQLite at
+        WARD_DATABASE_PATH, or data/ward.sqlite.
+
+    Returns
+    -------
+    dict
+        Baseline and attack measurements with convergence metadata.
+    """
     scenario = _load_pump_scenario(scenario_path)
     _validate_pump_scenario(scenario)
     baseline = wntr.network.WaterNetworkModel(str(network_path))
@@ -242,7 +349,12 @@ def run_paired_simulations(scenario_path, network_path, *, attack_first=False):
     cases = [("baseline", baseline, None), ("attack", attack, scenario)]
     if attack_first:
         cases.reverse()
-    return {name: _run_paired_case(network, outage) for name, network, outage in cases}
+    with _stored_run(scenario, network_path, storage) as (saved, run_id):
+        results = {
+            name: _run_paired_case(network, outage) for name, network, outage in cases
+        }
+        _save_case_results(saved, run_id, results)
+        return results
 
 
 def check_setup():

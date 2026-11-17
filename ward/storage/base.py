@@ -1,6 +1,33 @@
 """Shared interface for WARD storage implementations."""
 
+import json
 from typing import Any, Protocol
+
+ALLOWED_TRANSITIONS = {
+    "pending": {"running", "failed"},
+    "running": {"succeeded", "failed"},
+    "succeeded": set(),
+    "failed": set(),
+}
+
+
+def run_metadata(run: dict[str, Any]) -> dict[str, Any]:
+    """Copy JSON run configuration while rejecting live Python objects."""
+    unknown_fields = run.keys() - {
+        "run_id",
+        "scenario_id",
+        "model_id",
+        "status",
+        "metadata",
+    }
+    if unknown_fields:
+        raise ValueError(
+            f"Put run configuration in metadata: {', '.join(sorted(unknown_fields))}"
+        )
+    metadata = run.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise TypeError("Run metadata must be a JSON object")
+    return json.loads(json.dumps(metadata, allow_nan=False))
 
 
 class Storage(Protocol):
@@ -38,7 +65,16 @@ class Storage(Protocol):
 
     # Simulation run operations
     def save_run(self, run: dict[str, Any]) -> None:
-        """Save a simulation run and its results."""
+        """Save a pending or running record and its scenario snapshot.
+
+        Parameters
+        ----------
+        run : dict
+            Required keys are run_id, scenario_id, model_id, and status.
+            Optional metadata contains JSON configuration such as model content
+            identity, simulator version, duration, and timesteps. Duplicate IDs
+            raise ValueError. Missing scenarios or models raise KeyError.
+        """
         ...
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
@@ -63,10 +99,21 @@ class Storage(Protocol):
         """Change a run's status and record its history."""
         ...
 
-    def save_run_summary(self, run_id: str, summary: dict[str, Any]) -> None: ...
-    def get_run_summary(self, run_id: str) -> dict[str, Any] | None: ...
-    def save_run_details(self, run_id: str, results: dict[str, Any]) -> None: ...
-    def get_run_details(self, run_id: str) -> list[dict[str, Any]]: ...
+    def save_run_summary(self, run_id: str, summary: dict[str, Any]) -> None:
+        """Save a JSON summary once. Reject missing runs and duplicate summaries."""
+        ...
+
+    def get_run_summary(self, run_id: str) -> dict[str, Any] | None:
+        """Return a summary copy, or None when no summary is saved."""
+        ...
+
+    def save_run_details(self, run_id: str, results: dict[str, Any]) -> None:
+        """Save baseline/attack node/link metric DataFrames once per run."""
+        ...
+
+    def get_run_details(self, run_id: str) -> list[dict[str, Any]]:
+        """Return measurement records sorted by case, component, metric, and time."""
+        ...
 
     def close(self) -> None:
         """Release storage resources."""

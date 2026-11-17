@@ -4,12 +4,18 @@ import pandas as pd
 import pytest
 
 from ward.storage.memory import MemoryStorage
+from ward.storage.sqlite import SQLiteStorage
 
 
-@pytest.fixture
-def storage():
+@pytest.fixture(params=["memory", "sqlite"])
+def storage(request, tmp_path):
     """Create fresh in-memory storage for each test."""
-    return MemoryStorage()
+    if request.param == "memory":
+        db = MemoryStorage()
+    else:
+        db = SQLiteStorage(tmp_path / "shared.sqlite")
+    yield db
+    db.close()
 
 
 @pytest.fixture
@@ -57,7 +63,9 @@ def test_register_and_get_model(storage, sample_model):
 
     result = storage.get_model("ctown")
 
-    assert result == sample_model
+    assert {key: result[key] for key in sample_model} == sample_model
+    assert result["created_at"]
+    assert result["updated_at"]
 
 
 def test_create_and_get_scenario(storage, sample_model, sample_scenario):
@@ -321,7 +329,7 @@ def test_save_and_get_run_details(storage, sample_model, sample_scenario, sample
     details = storage.get_run_details("run_test_01")
 
     assert len(details) == 8
-    assert details[0]["case_name"] == "baseline"
+    assert details[0]["case_name"] == "attack"
     assert details[0]["component_type"] == "node"
     assert details[0]["metric_name"] == "pressure"
 
@@ -347,3 +355,75 @@ def test_duplicate_run_is_rejected(storage, sample_model, sample_scenario, sampl
 
     with pytest.raises(ValueError, match="Run already exists"):
         storage.save_run(sample_run)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("schema_version", "2.0"), ("attack_type", "unknown"), ("timing", {})],
+)
+def test_invalid_scenario_rejected(
+    storage, sample_model, sample_scenario, field, value
+):
+    storage.register_model(sample_model)
+    sample_scenario[field] = value
+    with pytest.raises(ValueError):
+        storage.create_scenario(sample_scenario)
+    assert storage.list_scenarios() == []
+
+
+def test_run_snapshot_metadata_and_timestamps(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    sample_run["metadata"] = {"simulator": "WNTRSimulator", "duration_seconds": 7200}
+    storage.save_run(sample_run)
+    original = storage.get_run(sample_run["run_id"])
+    sample_scenario["name"] = "Edited"
+    storage.update_scenario(sample_scenario["scenario_id"], sample_scenario)
+    assert original["scenario_snapshot"]["name"] == "Test Pump Failure"
+    assert original["metadata"] == sample_run["metadata"]
+    assert original["created_at"]
+    assert original["status_history"][0]["changed_at"]
+    storage.update_run_status(sample_run["run_id"], "running")
+    storage.update_run_status(sample_run["run_id"], "failed", "Solver failed")
+    final = storage.get_run(sample_run["run_id"])
+    assert final["started_at"]
+    assert final["completed_at"]
+    assert final["error_message"] == "Solver failed"
+    assert storage.list_runs()[0] == {
+        key: value
+        for key, value in final.items()
+        if key not in {"status_history", "scenario_snapshot"}
+    }
+
+
+def test_empty_details_are_saved_once(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    storage.save_run(sample_run)
+    storage.save_run_details(sample_run["run_id"], {})
+    with pytest.raises(ValueError, match="Details already exist"):
+        storage.save_run_details(sample_run["run_id"], {})
+
+
+def test_scenario_defaults_saved_in_json(storage, sample_model, sample_scenario):
+    storage.register_model(sample_model)
+    sample_scenario.pop("schema_version")
+    storage.create_scenario(sample_scenario)
+    assert (
+        storage.get_scenario(sample_scenario["scenario_id"])["schema_version"] == "1.0"
+    )
+
+
+def test_run_configuration_requires_explicit_metadata(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.create_scenario(sample_scenario)
+    sample_run["simulator"] = "WNTRSimulator"
+    with pytest.raises(ValueError, match="metadata"):
+        storage.save_run(sample_run)
+    assert storage.get_run(sample_run["run_id"]) is None

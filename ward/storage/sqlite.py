@@ -6,6 +6,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from ward.scenario import WaterScenario
+from ward.storage.base import ALLOWED_TRANSITIONS, run_metadata
+
 
 class SQLiteStorage:
     """Store WARD data persistently in a SQLite database."""
@@ -60,6 +63,7 @@ class SQLiteStorage:
     def create_scenario(self, scenario: dict[str, Any]) -> None:
         """Create a scenario and store its definition as JSON."""
 
+        scenario = WaterScenario.model_validate(scenario).model_dump(mode="json")
         scenario_id = scenario["scenario_id"]
         model_id = scenario["model_id"]
 
@@ -149,6 +153,7 @@ class SQLiteStorage:
         if scenario["scenario_id"] != scenario_id:
             raise ValueError("Scenario ID cannot be changed")
 
+        scenario = WaterScenario.model_validate(scenario).model_dump(mode="json")
         model_id = scenario["model_id"]
 
         if self.get_model(model_id) is None:
@@ -230,6 +235,7 @@ class SQLiteStorage:
             raise ValueError("A new run must start as pending or running")
 
         scenario_snapshot = json.dumps(scenario)
+        metadata_json = json.dumps(run_metadata(run), allow_nan=False)
 
         try:
             self.connection.execute(
@@ -240,9 +246,10 @@ class SQLiteStorage:
                     model_id,
                     scenario_snapshot,
                     status,
+                    metadata_json,
                     started_at
                 )
-                VALUES (?, ?, ?, ?, ?, 
+                VALUES (?, ?, ?, ?, ?, ?,
                     CASE WHEN ? = 'running'
                     THEN CURRENT_TIMESTAMP ELSE NULL END)
                 """,
@@ -252,6 +259,7 @@ class SQLiteStorage:
                     model_id,
                     scenario_snapshot,
                     status,
+                    metadata_json,
                     status,
                 ),
             )
@@ -293,6 +301,8 @@ class SQLiteStorage:
         run = dict(row)
 
         run["scenario_snapshot"] = json.loads(run["scenario_snapshot"])
+        run["metadata"] = json.loads(run.pop("metadata_json"))
+        run.pop("details_saved")
 
         history_rows = self.connection.execute(
             """
@@ -325,7 +335,8 @@ class SQLiteStorage:
                 started_at,
                 completed_at,
                 error_message,
-                created_at
+                created_at,
+                metadata_json
             FROM runs
         """
 
@@ -351,7 +362,10 @@ class SQLiteStorage:
 
         rows = self.connection.execute(query, parameters).fetchall()
 
-        return [dict(row) for row in rows]
+        runs = [dict(row) for row in rows]
+        for run in runs:
+            run["metadata"] = json.loads(run.pop("metadata_json"))
+        return runs
 
     def update_run_status(
         self,
@@ -360,13 +374,6 @@ class SQLiteStorage:
         details: str | None = None,
     ) -> None:
         """Update a run's status and record the change in its history."""
-
-        allowed_transitions = {
-            "pending": {"running", "failed"},
-            "running": {"succeeded", "failed"},
-            "succeeded": set(),
-            "failed": set(),
-        }
 
         row = self.connection.execute(
             """
@@ -382,7 +389,7 @@ class SQLiteStorage:
 
         current_status = row["status"]
 
-        if new_status not in allowed_transitions[current_status]:
+        if new_status not in ALLOWED_TRANSITIONS[current_status]:
             raise ValueError(
                 f"Invalid status transition: {current_status} -> {new_status}"
             )
@@ -526,7 +533,7 @@ class SQLiteStorage:
             raise KeyError(f"Run does not exist: {run_id}")
 
         existing = self.connection.execute(
-            "SELECT detail_id FROM result_details WHERE run_id = ? LIMIT 1",
+            "SELECT run_id FROM runs WHERE run_id = ? AND details_saved = 1",
             (run_id,),
         ).fetchone()
 
@@ -559,6 +566,9 @@ class SQLiteStorage:
                             )
 
         try:
+            self.connection.execute(
+                "UPDATE runs SET details_saved = 1 WHERE run_id = ?", (run_id,)
+            )
             self.connection.executemany(
                 """
                 INSERT INTO result_details (

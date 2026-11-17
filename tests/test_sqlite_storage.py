@@ -332,6 +332,85 @@ def test_migrations_are_not_applied_twice(tmp_path):
         "SELECT COUNT(*) AS count FROM schema_migrations"
     ).fetchone()
 
-    assert result["count"] == 1
+    assert result["count"] == 2
 
+    db.close()
+
+
+def test_upgrade_populated_version_one_database(tmp_path):
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    db_path = tmp_path / "upgrade.sqlite"
+    connection = sqlite3.connect(db_path)
+    initial = Path("migrations/001_initial_schema.sql").read_text(encoding="utf-8")
+    connection.executescript(initial)
+    connection.execute("INSERT INTO models (model_id, name) VALUES ('ctown', 'C-Town')")
+    scenario = json.loads(Path("ward/scenarios/pump_poweroff_basic.json").read_text())
+    connection.execute(
+        "INSERT INTO scenarios (scenario_id, model_id, schema_version, scenario_json) VALUES (?, 'ctown', '1.0', ?)",
+        (scenario["scenario_id"], json.dumps(scenario)),
+    )
+    connection.execute(
+        "INSERT INTO runs (run_id, scenario_id, model_id, scenario_snapshot, status) VALUES ('old_run', ?, 'ctown', ?, 'pending')",
+        (scenario["scenario_id"], json.dumps(scenario)),
+    )
+    connection.commit()
+    connection.close()
+    db = SQLiteStorage(db_path)
+    assert db.get_scenario(scenario["scenario_id"]) == scenario
+    assert db.get_run("old_run")["scenario_snapshot"] == scenario
+    assert db.get_run("old_run")["metadata"] == {}
+    db.close()
+    db = SQLiteStorage(db_path)
+    assert db.get_run("old_run")["status"] == "pending"
+    assert [
+        row[0]
+        for row in db.connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+    ] == [1, 2]
+    db.close()
+
+
+def test_failed_upgrade_rolls_back_and_can_be_retried(tmp_path, monkeypatch):
+    import sqlite3
+    from pathlib import Path
+
+    db_path = tmp_path / "retry.sqlite"
+    db = SQLiteStorage(db_path)
+    db.register_model({"model_id": "original", "name": "Original"})
+    db.close()
+    migration = tmp_path / "003_retry.sql"
+    migration.write_text(
+        "CREATE TABLE upgrade_probe (id INTEGER); INSERT INTO missing_table VALUES (1);"
+    )
+    original_glob = Path.glob
+
+    def migration_files(path, pattern):
+        files = list(original_glob(path, pattern))
+        if path.name == "migrations" and pattern == "*.sql":
+            files.append(migration)
+        return iter(files)
+
+    monkeypatch.setattr(Path, "glob", migration_files)
+    with pytest.raises(sqlite3.OperationalError):
+        SQLiteStorage(db_path)
+    connection = sqlite3.connect(db_path)
+    assert (
+        connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'upgrade_probe'"
+        ).fetchone()
+        is None
+    )
+    connection.close()
+    migration.write_text(
+        "CREATE TABLE upgrade_probe (id INTEGER); INSERT INTO schema_migrations (version) VALUES (3);"
+    )
+    db = SQLiteStorage(db_path)
+    assert db.get_model("original")["name"] == "Original"
+    assert db.connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 3"
+    ).fetchone()
     db.close()

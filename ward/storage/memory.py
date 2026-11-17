@@ -2,15 +2,12 @@
 
 import math
 from copy import deepcopy
+from datetime import datetime, timezone
+
+from ward.scenario import WaterScenario
+from ward.storage.base import ALLOWED_TRANSITIONS, run_metadata
 
 ALLOWED_STATUSES = {"pending", "running", "succeeded", "failed"}
-
-ALLOWED_TRANSITIONS = {
-    "pending": {"running", "failed"},
-    "running": {"succeeded", "failed"},
-    "succeeded": set(),
-    "failed": set(),
-}
 
 
 class MemoryStorage:
@@ -27,20 +24,31 @@ class MemoryStorage:
     # Model operations
 
     def register_model(self, model):
+        """Register a model. Reject duplicate IDs."""
         model_id = model["model_id"]
 
         if model_id in self.models:
             raise ValueError(f"Model already exists: {model_id}")
 
-        self.models[model_id] = deepcopy(model)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self.models[model_id] = {
+            "model_id": model_id,
+            "name": model["name"],
+            "description": model.get("description", ""),
+            "created_at": now,
+            "updated_at": now,
+        }
 
     def get_model(self, model_id):
+        """Return a model copy, or None for a missing ID."""
         model = self.models.get(model_id)
         return deepcopy(model) if model is not None else None
 
     # Scenario operations
 
     def create_scenario(self, scenario):
+        """Validate and save scenario JSON. Reject duplicates and missing models."""
+        scenario = WaterScenario.model_validate(scenario).model_dump(mode="json")
         scenario_id = scenario["scenario_id"]
         model_id = scenario["model_id"]
 
@@ -53,10 +61,12 @@ class MemoryStorage:
         self.scenarios[scenario_id] = deepcopy(scenario)
 
     def get_scenario(self, scenario_id):
+        """Return a scenario copy, or None for a missing ID."""
         scenario = self.scenarios.get(scenario_id)
         return deepcopy(scenario) if scenario is not None else None
 
     def list_scenarios(self, model_id=None):
+        """Return scenario copies ordered by ID, optionally filtered by model."""
         scenarios = self.scenarios.values()
 
         if model_id is not None:
@@ -64,15 +74,17 @@ class MemoryStorage:
                 scenario for scenario in scenarios if scenario["model_id"] == model_id
             ]
 
-        return deepcopy(list(scenarios))
+        return deepcopy(sorted(scenarios, key=lambda scenario: scenario["scenario_id"]))
 
     def update_scenario(self, scenario_id, scenario):
+        """Replace a scenario with validated JSON while preserving its ID."""
         if scenario_id not in self.scenarios:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
         if scenario["scenario_id"] != scenario_id:
             raise ValueError("Scenario ID cannot be changed")
 
+        scenario = WaterScenario.model_validate(scenario).model_dump(mode="json")
         model_id = scenario["model_id"]
 
         if model_id not in self.models:
@@ -81,6 +93,7 @@ class MemoryStorage:
         self.scenarios[scenario_id] = deepcopy(scenario)
 
     def delete_scenario(self, scenario_id: str) -> None:
+        """Delete a scenario. Reject missing IDs and historical run dependencies."""
         if scenario_id not in self.scenarios:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
@@ -92,6 +105,7 @@ class MemoryStorage:
     # Simulation run operations
 
     def save_run(self, run):
+        """Save a pending or running record using the Storage run contract."""
         run_id = run["run_id"]
         scenario_id = run["scenario_id"]
         model_id = run["model_id"]
@@ -115,17 +129,31 @@ class MemoryStorage:
         if status not in {"pending", "running"}:
             raise ValueError("A new run must start as pending or running")
 
-        self.runs[run_id] = deepcopy(run)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self.runs[run_id] = {
+            "run_id": run_id,
+            "scenario_id": scenario_id,
+            "model_id": model_id,
+            "status": status,
+            "scenario_snapshot": deepcopy(self.scenarios[scenario_id]),
+            "metadata": run_metadata(run),
+            "created_at": now,
+            "started_at": now if status == "running" else None,
+            "completed_at": None,
+            "error_message": None,
+        }
 
         self.status_history[run_id] = [
             {
                 "previous_status": None,
                 "new_status": status,
                 "details": "Run created",
+                "changed_at": now,
             }
         ]
 
     def get_run(self, run_id):
+        """Return a run snapshot and status history, or None for a missing ID."""
         run = self.runs.get(run_id)
 
         if run is None:
@@ -142,6 +170,7 @@ class MemoryStorage:
         model_id=None,
         status=None,
     ):
+        """List run records with optional scenario, model, and status filters."""
         runs = []
 
         for run in self.runs.values():
@@ -154,11 +183,14 @@ class MemoryStorage:
             if status is not None and run["status"] != status:
                 continue
 
-            runs.append(run)
+            runs.append(
+                {key: value for key, value in run.items() if key != "scenario_snapshot"}
+            )
 
         return deepcopy(runs)
 
     def update_run_status(self, run_id, new_status, details=None):
+        """Apply an allowed transition and record its timestamp and details."""
         if run_id not in self.runs:
             raise KeyError(f"Run does not exist: {run_id}")
 
@@ -172,13 +204,22 @@ class MemoryStorage:
                 f"Invalid status transition: {current_status} -> {new_status}"
             )
 
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self.runs[run_id]["status"] = new_status
+        if new_status == "running":
+            self.runs[run_id]["started_at"] = now
+        else:
+            self.runs[run_id]["completed_at"] = now
+            self.runs[run_id]["error_message"] = (
+                details if new_status == "failed" else None
+            )
 
         self.status_history[run_id].append(
             {
                 "previous_status": current_status,
                 "new_status": new_status,
                 "details": details,
+                "changed_at": now,
             }
         )
 
@@ -231,7 +272,18 @@ class MemoryStorage:
 
     def get_run_details(self, run_id):
         """Retrieve individual measurements for a simulation run."""
-        return deepcopy(self.run_details.get(run_id, []))
+        return deepcopy(
+            sorted(
+                self.run_details.get(run_id, []),
+                key=lambda record: (
+                    record["case_name"],
+                    record["component_type"],
+                    record["metric_name"],
+                    record["component_id"],
+                    record["time_seconds"],
+                ),
+            )
+        )
 
     def close(self):
         """Clear all stored data."""
