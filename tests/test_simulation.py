@@ -17,6 +17,11 @@ from ward.simulation import (
 from wntr.epanet.exceptions import ENSyntaxError
 
 
+@pytest.fixture(autouse=True)
+def simulation_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("WARD_DATABASE_PATH", str(tmp_path / "data" / "ward.sqlite"))
+
+
 @pytest.mark.simulation
 def test_paired_runs_match_when_run_order_is_reversed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -42,7 +47,19 @@ def test_paired_runs_match_when_run_order_is_reversed(tmp_path, monkeypatch):
     assert forward["baseline"]["settings"] == forward["attack"]["settings"]
     assert forward["baseline"]["simulator"] == "WNTRSimulator"
     assert forward["baseline"]["wntr_version"] == wntr.__version__
-    assert list(tmp_path.iterdir()) == [scenario_path]
+    from ward.storage.sqlite import SQLiteStorage
+
+    saved = SQLiteStorage(tmp_path / "data" / "ward.sqlite")
+    runs = saved.list_runs(scenario_id="paired-run")
+    assert len(runs) == 2
+    assert all(run["status"] == "succeeded" for run in runs)
+    assert (
+        saved.get_run(runs[0]["run_id"])["scenario_snapshot"]["scenario_id"]
+        == "paired-run"
+    )
+    assert saved.get_run_summary(runs[0]["run_id"])["baseline"]["converged"]
+    assert saved.get_run_details(runs[0]["run_id"])
+    saved.close()
     assert forward["baseline"]["link"]["status"].loc[7200, "9"] == 1
     assert forward["attack"]["link"]["status"].loc[7200, "9"] == 0
     for case in ("baseline", "attack"):
@@ -284,3 +301,56 @@ def test_pump_attack_results_are_identical_across_three_runs(
                 rtol=0,
                 atol=1e-12,
             )
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_paired_run_failures_are_saved(tmp_path, monkeypatch, raises):
+    from ward.storage.memory import MemoryStorage
+
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": "failed-run",
+                "name": "Failure test",
+                "attack_type": "pump_off",
+                "model_id": "net1",
+                "target_components": ["9"],
+                "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+                "parameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    storage = MemoryStorage()
+
+    def fail_case(network, scenario):
+        if raises:
+            raise RuntimeError("Solver failed")
+        return {
+            "converged": False,
+            "failure": {"message": "Solver failed"},
+            "node": {},
+            "link": {},
+        }
+
+    monkeypatch.setattr(simulation, "_run_paired_case", fail_case)
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+    if raises:
+        with pytest.raises(RuntimeError, match="Solver failed"):
+            simulation.run_paired_simulations(
+                scenario_path, network_path, storage=storage
+            )
+    else:
+        result = simulation.run_paired_simulations(
+            scenario_path, network_path, storage=storage
+        )
+        assert not result["attack"]["converged"]
+
+    runs = storage.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert "Solver failed" in runs[0]["error_message"]
+    saved = storage.get_run(runs[0]["run_id"])
+    assert saved["metadata"]["network_sha256"]
+    assert saved["scenario_snapshot"]["schema_version"] == "1.0"

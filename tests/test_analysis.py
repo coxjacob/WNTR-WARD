@@ -176,7 +176,8 @@ def test_unit_conversion_20_psi_constant():
     assert 20.0 * PSI_TO_METERS == pytest.approx(14.06139, abs=1e-4)
 
 
-def test_ctown_pump_demo_affected_nodes_integration():
+def test_ctown_pump_demo_affected_nodes_integration(tmp_path, monkeypatch):
+    monkeypatch.setenv("WARD_DATABASE_PATH", str(tmp_path / "ward.sqlite"))
     """Run bundled pump_poweroff_basic.json on C-Town and verify structured report."""
     ctown_path = (
         Path(__file__).resolve().parent.parent / "examples" / "networks" / "CTOWN.inp"
