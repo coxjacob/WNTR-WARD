@@ -92,6 +92,50 @@ def test_paired_runs_match_when_run_order_is_reversed(tmp_path, monkeypatch):
 
 
 @pytest.mark.simulation
+def test_paired_run_uses_caller_run_id(tmp_path):
+    from ward.storage.memory import MemoryStorage
+
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": "submitted-scenario",
+                "name": "Submitted run",
+                "attack_type": "pump_off",
+                "model_id": "net1",
+                "target_components": ["9"],
+                "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+                "parameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    storage = MemoryStorage()
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    simulation.run_paired_simulations(
+        scenario_path, network_path, storage=storage, run_id="submitted-run"
+    )
+
+    runs = storage.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == "submitted-run"
+    assert runs[0]["status"] == "succeeded"
+    assert storage.get_run("submitted-run")["scenario_snapshot"]["scenario_id"] == (
+        "submitted-scenario"
+    )
+    assert storage.get_run_summary("submitted-run")["baseline"]["converged"]
+    assert storage.get_run_details("submitted-run")
+
+    saved_run = storage.get_run("submitted-run")
+    with pytest.raises(ValueError, match="Run already exists"):
+        simulation.run_paired_simulations(
+            scenario_path, network_path, storage=storage, run_id="submitted-run"
+        )
+    assert storage.get_run("submitted-run") == saved_run
+
+
+@pytest.mark.simulation
 def test_short_simulation_returns_pressures_and_flows(tmp_path):
     network = load_test_network()
     network.options.time.duration = 3600

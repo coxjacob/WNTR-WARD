@@ -158,13 +158,13 @@ def _apply_pump_outage(network, scenario):
 
 
 @contextmanager
-def _stored_run(scenario, network_path, storage):
+def _stored_run(scenario, network_path, storage, run_id=None):
     owned = storage is None
     if owned:
         storage = SQLiteStorage(
             os.environ.get("WARD_DATABASE_PATH", "data/ward.sqlite")
         )
-    run_id = None
+    saved_run = False
     try:
         definition = scenario.model_dump(mode="json")
         if storage.get_model(scenario.model_id) is None:
@@ -175,7 +175,8 @@ def _stored_run(scenario, network_path, storage):
             storage.create_scenario(definition)
         else:
             storage.update_scenario(scenario.scenario_id, definition)
-        run_id = uuid4().hex
+        if run_id is None:
+            run_id = uuid4().hex
         storage.save_run(
             {
                 "run_id": run_id,
@@ -191,9 +192,10 @@ def _stored_run(scenario, network_path, storage):
                 },
             }
         )
+        saved_run = True
         yield storage, run_id
     except Exception as error:
-        if run_id is not None and storage.get_run(run_id) is not None:
+        if saved_run:
             storage.update_run_status(run_id, "failed", str(error))
         raise
     finally:
@@ -316,7 +318,7 @@ def _run_paired_case(network, scenario=None):
 
 # run the baseline and pump outage with matching settings so that the results can be compared
 def run_paired_simulations(
-    scenario_path, network_path, *, attack_first=False, storage=None
+    scenario_path, network_path, *, attack_first=False, storage=None, run_id=None
 ):
     """Run and persist a baseline and attack comparison.
 
@@ -331,6 +333,9 @@ def run_paired_simulations(
     storage : Storage, optional
         Inject storage for tests. By default use SQLite at
         WARD_DATABASE_PATH, or data/ward.sqlite.
+    run_id : str, optional
+        ID for the new run. Must not already exist in storage. When omitted,
+        generate a new ID.
 
     Returns
     -------
@@ -349,11 +354,11 @@ def run_paired_simulations(
     cases = [("baseline", baseline, None), ("attack", attack, scenario)]
     if attack_first:
         cases.reverse()
-    with _stored_run(scenario, network_path, storage) as (saved, run_id):
+    with _stored_run(scenario, network_path, storage, run_id) as (saved, saved_run_id):
         results = {
             name: _run_paired_case(network, outage) for name, network, outage in cases
         }
-        _save_case_results(saved, run_id, results)
+        _save_case_results(saved, saved_run_id, results)
         return results
 
 
