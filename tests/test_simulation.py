@@ -2,6 +2,7 @@ import csv
 import json
 from importlib.resources import files
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
@@ -20,6 +21,133 @@ from wntr.epanet.exceptions import ENSyntaxError
 @pytest.fixture(autouse=True)
 def simulation_database(tmp_path, monkeypatch):
     monkeypatch.setenv("WARD_DATABASE_PATH", str(tmp_path / "data" / "ward.sqlite"))
+
+
+@pytest.fixture
+def background_paths(tmp_path):
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": "background-scenario",
+                "name": "Background test",
+                "attack_type": "pump_off",
+                "model_id": "net1",
+                "target_components": ["9"],
+                "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+                "parameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return scenario_path, files("wntr.library").joinpath("networks", "Net1.inp")
+
+
+@pytest.mark.simulation
+def test_background_runs_queue_and_save_results(
+    background_paths, tmp_path, monkeypatch
+):
+    from ward import analysis
+    from ward.storage.sqlite import SQLiteStorage
+
+    started = Event()
+    release = Event()
+    identify = analysis.identify_affected_nodes
+
+    def wait_for_release(*args, **kwargs):
+        started.set()
+        assert release.wait(10)
+        return identify(*args, **kwargs)
+
+    monkeypatch.setattr(analysis, "identify_affected_nodes", wait_for_release)
+    database_path = tmp_path / "background.sqlite"
+    manager = simulation.RunManager(database_path)
+    try:
+        first = manager.submit(*background_paths)
+        assert started.wait(10)
+        assert manager.get_status(first) == "running"
+        second = manager.submit(*background_paths)
+        assert second != first
+        assert manager.get_status(second) == "queued"
+        assert manager.get_status("unknown") is None
+        background_paths[0].write_text("invalid scenario", encoding="utf-8")
+    finally:
+        release.set()
+        manager.close()
+
+    assert manager.get_status(first) == "succeeded"
+    assert manager.get_status(second) == "succeeded"
+    storage = SQLiteStorage(database_path)
+    try:
+        assert len(storage.list_runs()) == 2
+        for run_id in (first, second):
+            run = storage.get_run(run_id)
+            assert [item["new_status"] for item in run["status_history"]] == [
+                "pending",
+                "running",
+                "succeeded",
+            ]
+            assert storage.get_run_summary(run_id)["analysis"]["scenario_id"] == (
+                "background-scenario"
+            )
+            assert storage.get_run_details(run_id)
+    finally:
+        storage.close()
+
+
+@pytest.mark.simulation
+@pytest.mark.parametrize("failure", ["model", "attack"])
+def test_background_failure_does_not_stop_next_run(background_paths, tmp_path, failure):
+    from ward.storage.sqlite import SQLiteStorage
+
+    scenario_path, network_path = background_paths
+    original_scenario = scenario_path.read_text(encoding="utf-8")
+    if failure == "model":
+        failed_network = tmp_path / "invalid.inp"
+        failed_network.write_text("This is not a valid EPANET network file")
+    else:
+        failed_network = network_path
+        definition = json.loads(original_scenario)
+        definition["target_components"] = ["missing-pump"]
+        scenario_path.write_text(json.dumps(definition), encoding="utf-8")
+
+    database_path = tmp_path / "background.sqlite"
+    manager = simulation.RunManager(database_path)
+    try:
+        failed_id = manager.submit(scenario_path, failed_network)
+        scenario_path.write_text(original_scenario, encoding="utf-8")
+        next_id = manager.submit(scenario_path, network_path)
+    finally:
+        manager.close()
+
+    assert manager.get_status(failed_id) == "failed"
+    assert manager.get_status(next_id) == "succeeded"
+    storage = SQLiteStorage(database_path)
+    try:
+        run = storage.get_run(failed_id)
+        assert run["error_message"]
+        assert "succeeded" not in [item["new_status"] for item in run["status_history"]]
+    finally:
+        storage.close()
+
+
+def test_background_scheduling_failure_is_saved(background_paths, tmp_path):
+    from ward.storage.sqlite import SQLiteStorage
+
+    database_path = tmp_path / "background.sqlite"
+    manager = simulation.RunManager(database_path)
+    manager.close()
+
+    with pytest.raises(RuntimeError, match="shutdown"):
+        manager.submit(*background_paths)
+
+    storage = SQLiteStorage(database_path)
+    try:
+        runs = storage.list_runs()
+        assert len(runs) == 1
+        assert runs[0]["status"] == "failed"
+    finally:
+        storage.close()
 
 
 @pytest.mark.simulation

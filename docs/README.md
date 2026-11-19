@@ -50,6 +50,15 @@ recorded with failure details. Pass `storage=MemoryStorage()` to either function
 when testing without disk persistence. Storage connections opened by the
 simulation functions are closed before they return.
 
+For background execution, create one `RunManager` from `ward.simulation`.
+Its `submit(scenario_path, network_path)` method returns a run ID immediately;
+`get_status(run_id)` returns `queued`, `running`, `succeeded`, or `failed`
+(or `None` for an unknown ID). It uses one worker and separate SQLite
+connections for submission, execution, and polling. Call `close()` during
+shutdown to wait for accepted runs to finish. Queued runs use their saved
+scenario snapshots.
+The queue is in memory.
+
 ## Structure and responsibilities
 
 | Location | Purpose |

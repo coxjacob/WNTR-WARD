@@ -1,6 +1,8 @@
 import hashlib
+import logging
 import os
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
@@ -105,6 +107,8 @@ class _PumpStatusAction(BaseControlAction):
 
 # load requested scenario or default to the bundled pump outage scenario if none is provided
 def _load_pump_scenario(scenario_path):
+    if isinstance(scenario_path, WaterScenario):
+        return scenario_path
     if scenario_path is None:
         scenario_path = (
             Path(__file__).resolve().parent / "scenarios" / "pump_poweroff_basic.json"
@@ -159,7 +163,9 @@ def _apply_pump_outage(network, scenario):
 
 
 @contextmanager
-def _stored_run(scenario, network_path, storage, run_id=None):
+def _stored_run(
+    scenario, network_path, storage, run_id=None, *, initial_status="running"
+):
     owned = storage is None
     if owned:
         storage = SQLiteStorage(
@@ -168,31 +174,41 @@ def _stored_run(scenario, network_path, storage, run_id=None):
     saved_run = False
     try:
         definition = scenario.model_dump(mode="json")
-        if storage.get_model(scenario.model_id) is None:
-            storage.register_model(
-                {"model_id": scenario.model_id, "name": scenario.model_id}
-            )
-        if storage.get_scenario(scenario.scenario_id) is None:
-            storage.create_scenario(definition)
-        else:
-            storage.update_scenario(scenario.scenario_id, definition)
         if run_id is None:
             run_id = uuid4().hex
-        storage.save_run(
-            {
-                "run_id": run_id,
-                "scenario_id": scenario.scenario_id,
-                "model_id": scenario.model_id,
-                "status": "running",
-                "metadata": {
-                    "network_path": str(Path(network_path).resolve()),
-                    "network_sha256": hashlib.sha256(
-                        Path(network_path).read_bytes()
-                    ).hexdigest(),
-                    "wntr_version": wntr.__version__,
-                },
-            }
-        )
+        existing = storage.get_run(run_id)
+        if existing is not None:
+            if (
+                initial_status != "running"
+                or existing["status"] != "pending"
+                or existing["scenario_snapshot"] != definition
+            ):
+                raise ValueError(f"Run already exists: {run_id}")
+            storage.update_run_status(run_id, "running")
+        else:
+            if storage.get_model(scenario.model_id) is None:
+                storage.register_model(
+                    {"model_id": scenario.model_id, "name": scenario.model_id}
+                )
+            if storage.get_scenario(scenario.scenario_id) is None:
+                storage.create_scenario(definition)
+            else:
+                storage.update_scenario(scenario.scenario_id, definition)
+            storage.save_run(
+                {
+                    "run_id": run_id,
+                    "scenario_id": scenario.scenario_id,
+                    "model_id": scenario.model_id,
+                    "status": initial_status,
+                    "metadata": {
+                        "network_path": str(Path(network_path).resolve()),
+                        "network_sha256": hashlib.sha256(
+                            Path(network_path).read_bytes()
+                        ).hexdigest(),
+                        "wntr_version": wntr.__version__,
+                    },
+                }
+            )
         saved_run = True
         yield storage, run_id
     except Exception as error:
@@ -330,8 +346,8 @@ def run_paired_simulations(
 
     Parameters
     ----------
-    scenario_path : path-like
-        Versioned scenario JSON file.
+    scenario_path : path-like or WaterScenario
+        Versioned scenario JSON file or validated scenario snapshot.
     network_path : path-like
         EPANET network file matching the scenario model.
     attack_first : bool, optional
@@ -373,6 +389,68 @@ def run_paired_simulations(
             saved, saved_run_id, results, analysis_result=analysis_result
         )
         return results
+
+
+class RunManager:
+    """Queue paired runs on one worker. Call close() during application shutdown."""
+
+    def __init__(self, database_path=None):
+        self.database_path = Path(
+            database_path or os.environ.get("WARD_DATABASE_PATH", "data/ward.sqlite")
+        ).resolve()
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+    def submit(self, scenario_path, network_path):
+        """Save a pending run and return its ID without waiting for simulation."""
+        scenario = _load_pump_scenario(scenario_path)
+        _validate_pump_scenario(scenario)
+        network_path = Path(network_path).resolve()
+        storage = SQLiteStorage(self.database_path)
+        try:
+            with _stored_run(
+                scenario, network_path, storage, initial_status="pending"
+            ) as (_, run_id):
+                self._executor.submit(self._execute, run_id)
+            return run_id
+        finally:
+            storage.close()
+
+    def _execute(self, run_id):
+        storage = None
+        try:
+            storage = SQLiteStorage(self.database_path)
+            run = storage.get_run(run_id)
+            network_path = Path(run["metadata"]["network_path"])
+            run_paired_simulations(
+                WaterScenario.model_validate(run["scenario_snapshot"]),
+                network_path,
+                storage=storage,
+                run_id=run_id,
+            )
+        except Exception as error:
+            logging.getLogger(__name__).exception("Run %s failed", run_id)
+            if storage is not None:
+                run = storage.get_run(run_id)
+                if run["status"] in {"pending", "running"}:
+                    storage.update_run_status(run_id, "failed", str(error))
+        finally:
+            if storage is not None:
+                storage.close()
+
+    def get_status(self, run_id):
+        """Return queued, running, succeeded, failed, or None for an unknown ID."""
+        storage = SQLiteStorage(self.database_path)
+        try:
+            run = storage.get_run(run_id)
+            if run is None:
+                return None
+            return "queued" if run["status"] == "pending" else run["status"]
+        finally:
+            storage.close()
+
+    def close(self):
+        """Wait for accepted runs to finish and release the worker."""
+        self._executor.shutdown(wait=True)
 
 
 def check_setup():
