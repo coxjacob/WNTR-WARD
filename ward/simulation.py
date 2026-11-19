@@ -13,6 +13,7 @@ import pandas as pd
 import wntr
 from wntr.network.controls import BaseControlAction
 
+from . import analysis
 from .scenario import WaterScenario
 from .storage.sqlite import SQLiteStorage
 
@@ -203,11 +204,13 @@ def _stored_run(scenario, network_path, storage, run_id=None):
             storage.close()
 
 
-def _save_case_results(storage, run_id, results):
+def _save_case_results(storage, run_id, results, *, analysis_result=None):
     summary = {
         name: {key: value for key, value in case.items() if key not in {"node", "link"}}
         for name, case in results.items()
     }
+    if analysis_result is not None:
+        summary["analysis"] = analysis_result
     storage.save_run_summary(run_id, summary)
     storage.save_run_details(run_id, results)
     failures = [
@@ -320,7 +323,10 @@ def _run_paired_case(network, scenario=None):
 def run_paired_simulations(
     scenario_path, network_path, *, attack_first=False, storage=None, run_id=None
 ):
-    """Run and persist a baseline and attack comparison.
+    """Run, analyze, and save a baseline-versus-attack comparison.
+
+    Affected-node analysis is saved in the run summary when both cases
+    converge. Success is recorded only after analysis and persistence finish.
 
     Parameters
     ----------
@@ -358,7 +364,14 @@ def run_paired_simulations(
         results = {
             name: _run_paired_case(network, outage) for name, network, outage in cases
         }
-        _save_case_results(saved, saved_run_id, results)
+        analysis_result = None
+        if all(case["converged"] for case in results.values()):
+            analysis_result = analysis.identify_affected_nodes(
+                results, scenario=scenario
+            )
+        _save_case_results(
+            saved, saved_run_id, results, analysis_result=analysis_result
+        )
         return results
 
 

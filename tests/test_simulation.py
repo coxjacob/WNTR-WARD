@@ -58,6 +58,9 @@ def test_paired_runs_match_when_run_order_is_reversed(tmp_path, monkeypatch):
         == "paired-run"
     )
     assert saved.get_run_summary(runs[0]["run_id"])["baseline"]["converged"]
+    assert saved.get_run_summary(runs[0]["run_id"])["analysis"]["scenario_id"] == (
+        "paired-run"
+    )
     assert saved.get_run_details(runs[0]["run_id"])
     saved.close()
     assert forward["baseline"]["link"]["status"].loc[7200, "9"] == 1
@@ -125,6 +128,9 @@ def test_paired_run_uses_caller_run_id(tmp_path):
         "submitted-scenario"
     )
     assert storage.get_run_summary("submitted-run")["baseline"]["converged"]
+    analysis = storage.get_run_summary("submitted-run")["analysis"]
+    assert analysis["scenario_id"] == "submitted-scenario"
+    assert analysis["summary"]["affected_node_count"] > 0
     assert storage.get_run_details("submitted-run")
 
     saved_run = storage.get_run("submitted-run")
@@ -133,6 +139,47 @@ def test_paired_run_uses_caller_run_id(tmp_path):
             scenario_path, network_path, storage=storage, run_id="submitted-run"
         )
     assert storage.get_run("submitted-run") == saved_run
+
+
+@pytest.mark.simulation
+def test_paired_run_analysis_failure_is_saved(tmp_path, monkeypatch):
+    from ward import analysis
+    from ward.storage.memory import MemoryStorage
+
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": "analysis-failure",
+                "name": "Analysis failure test",
+                "attack_type": "pump_off",
+                "model_id": "net1",
+                "target_components": ["9"],
+                "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+                "parameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    storage = MemoryStorage()
+
+    def fail_analysis(*args, **kwargs):
+        assert storage.get_run("failed-analysis")["status"] == "running"
+        raise ValueError("Analysis failed")
+
+    monkeypatch.setattr(analysis, "identify_affected_nodes", fail_analysis)
+    network_path = files("wntr.library").joinpath("networks", "Net1.inp")
+
+    with pytest.raises(ValueError, match="Analysis failed"):
+        simulation.run_paired_simulations(
+            scenario_path, network_path, storage=storage, run_id="failed-analysis"
+        )
+
+    run = storage.get_run("failed-analysis")
+    assert run["status"] == "failed"
+    assert run["error_message"] == "Analysis failed"
+    assert "succeeded" not in [item["new_status"] for item in run["status_history"]]
+    assert storage.get_run_summary("failed-analysis") is None
 
 
 @pytest.mark.simulation
