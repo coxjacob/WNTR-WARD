@@ -298,14 +298,14 @@ def test_paired_run_analysis_failure_is_saved(tmp_path, monkeypatch):
     monkeypatch.setattr(analysis, "identify_affected_nodes", fail_analysis)
     network_path = files("wntr.library").joinpath("networks", "Net1.inp")
 
-    with pytest.raises(ValueError, match="Analysis failed"):
+    with pytest.raises(simulation.RunError, match="ANALYSIS_ERROR: Analysis failed"):
         simulation.run_paired_simulations(
             scenario_path, network_path, storage=storage, run_id="failed-analysis"
         )
 
     run = storage.get_run("failed-analysis")
     assert run["status"] == "failed"
-    assert run["error_message"] == "Analysis failed"
+    assert run["error_message"] == "ANALYSIS_ERROR: Analysis failed"
     assert "succeeded" not in [item["new_status"] for item in run["status_history"]]
     assert storage.get_run_summary("failed-analysis") is None
 
@@ -433,6 +433,7 @@ def test_pump_attack_rejects_invalid_target(tmp_path, target):
     assert paired["attack"]["failure"] == {
         "type": "ValueError",
         "message": f"Target '{target}' is not a pump in the selected network",
+        "code": "ATTACK_SETUP_ERROR",
     }
 
 

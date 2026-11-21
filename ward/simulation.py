@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import sqlite3
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -18,6 +19,61 @@ from wntr.network.controls import BaseControlAction
 from . import analysis
 from .scenario import WaterScenario
 from .storage.sqlite import SQLiteStorage
+
+
+class RunError(RuntimeError):
+    def __init__(self, code, detail):
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+
+
+def _failure_details(error):
+    if isinstance(error, RunError):
+        return str(error)
+    code = (
+        "STORAGE_ERROR"
+        if isinstance(error, (sqlite3.Error, OSError))
+        else "UNEXPECTED_ERROR"
+    )
+    return f"{code}: {error}"
+
+
+@contextmanager
+def _run_stage(code):
+    try:
+        yield
+    except RunError:
+        raise
+    except Exception as error:
+        logging.getLogger(__name__).exception("%s", code)
+        raise RunError(code, str(error)) from error
+
+
+def load_network_topology(network_path):
+    """Return plain network data for the dashboard, using model coordinates."""
+    with _run_stage("MODEL_LOADING_ERROR"):
+        network = wntr.network.WaterNetworkModel(str(network_path))
+        return {
+            "nodes": [
+                {
+                    "node_id": name,
+                    "type": node.node_type,
+                    "coordinates": node.coordinates,
+                }
+                for name, node in network.nodes()
+            ],
+            "links": [
+                {
+                    "link_id": name,
+                    "type": link.link_type,
+                    "start_node": link.start_node_name,
+                    "end_node": link.end_node_name,
+                    "vertices": link.vertices,
+                }
+                for name, link in network.links()
+            ],
+            "visualization": {"coordinate_system": "model"},
+        }
 
 
 def load_test_network():
@@ -194,26 +250,28 @@ def _stored_run(
                 storage.create_scenario(definition)
             else:
                 storage.update_scenario(scenario.scenario_id, definition)
+            with _run_stage("MODEL_LOADING_ERROR"):
+                metadata = {
+                    "network_path": str(Path(network_path).resolve()),
+                    "network_sha256": hashlib.sha256(
+                        Path(network_path).read_bytes()
+                    ).hexdigest(),
+                    "wntr_version": wntr.__version__,
+                }
             storage.save_run(
                 {
                     "run_id": run_id,
                     "scenario_id": scenario.scenario_id,
                     "model_id": scenario.model_id,
                     "status": initial_status,
-                    "metadata": {
-                        "network_path": str(Path(network_path).resolve()),
-                        "network_sha256": hashlib.sha256(
-                            Path(network_path).read_bytes()
-                        ).hexdigest(),
-                        "wntr_version": wntr.__version__,
-                    },
+                    "metadata": metadata,
                 }
             )
         saved_run = True
         yield storage, run_id
     except Exception as error:
         if saved_run:
-            storage.update_run_status(run_id, "failed", str(error))
+            storage.update_run_status(run_id, "failed", _failure_details(error))
         raise
     finally:
         if owned:
@@ -230,7 +288,9 @@ def _save_case_results(storage, run_id, results, *, analysis_result=None):
     storage.save_run_summary(run_id, summary)
     storage.save_run_details(run_id, results)
     failures = [
-        str(case["failure"]) for case in results.values() if not case["converged"]
+        f"{case['failure'].get('code', 'SIMULATION_ERROR')}: {case['failure']}"
+        for case in results.values()
+        if not case["converged"]
     ]
     storage.update_run_status(
         run_id,
@@ -311,12 +371,23 @@ def _run_paired_case(network, scenario=None):
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
+        stage = "ATTACK_SETUP_ERROR"
         try:
             if scenario is not None:
                 _apply_pump_outage(network, scenario)
+            stage = "SIMULATION_ERROR"
             results = wntr.sim.WNTRSimulator(network).run_sim(convergence_error=True)
         except (RuntimeError, ValueError, ArithmeticError) as error:
-            failure = {"type": type(error).__name__, "message": str(error)}
+            if stage == "SIMULATION_ERROR" and str(error).startswith(
+                ("Simulation did not converge", "Exceeded maximum number of trials")
+            ):
+                stage = "CONVERGENCE_ERROR"
+            logging.getLogger(__name__).exception("%s", stage)
+            failure = {
+                "type": type(error).__name__,
+                "message": str(error),
+                "code": stage,
+            }
 
     return {
         "simulator": "WNTRSimulator",
@@ -366,8 +437,9 @@ def run_paired_simulations(
     """
     scenario = _load_pump_scenario(scenario_path)
     _validate_pump_scenario(scenario)
-    baseline = wntr.network.WaterNetworkModel(str(network_path))
-    attack = wntr.network.WaterNetworkModel(str(network_path))
+    with _run_stage("MODEL_LOADING_ERROR"):
+        baseline = wntr.network.WaterNetworkModel(str(network_path))
+        attack = wntr.network.WaterNetworkModel(str(network_path))
     end_time = scenario.timing.start_time_sec + scenario.timing.duration_sec
     duration = max(baseline.options.time.duration, end_time)
     baseline.options.time.duration = duration
@@ -382,9 +454,10 @@ def run_paired_simulations(
         }
         analysis_result = None
         if all(case["converged"] for case in results.values()):
-            analysis_result = analysis.identify_affected_nodes(
-                results, scenario=scenario
-            )
+            with _run_stage("ANALYSIS_ERROR"):
+                analysis_result = analysis.identify_affected_nodes(
+                    results, scenario=scenario
+                )
         _save_case_results(
             saved, saved_run_id, results, analysis_result=analysis_result
         )
@@ -402,8 +475,9 @@ class RunManager:
 
     def submit(self, scenario_path, network_path):
         """Save a pending run and return its ID without waiting for simulation."""
-        scenario = _load_pump_scenario(scenario_path)
-        _validate_pump_scenario(scenario)
+        with _run_stage("INPUT_ERROR"):
+            scenario = _load_pump_scenario(scenario_path)
+            _validate_pump_scenario(scenario)
         network_path = Path(network_path).resolve()
         storage = SQLiteStorage(self.database_path)
         try:
@@ -432,21 +506,68 @@ class RunManager:
             if storage is not None:
                 run = storage.get_run(run_id)
                 if run["status"] in {"pending", "running"}:
-                    storage.update_run_status(run_id, "failed", str(error))
+                    storage.update_run_status(run_id, "failed", _failure_details(error))
         finally:
             if storage is not None:
                 storage.close()
 
     def get_status(self, run_id):
         """Return queued, running, succeeded, failed, or None for an unknown ID."""
+        run = self.get_run(run_id)
+        return run["status"] if run is not None else None
+
+    def get_run(self, run_id):
+        """Retrieve a saved run, translating pending to queued for callers."""
         storage = SQLiteStorage(self.database_path)
         try:
             run = storage.get_run(run_id)
-            if run is None:
-                return None
-            return "queued" if run["status"] == "pending" else run["status"]
+            if run is not None and run["status"] == "pending":
+                run["status"] = "queued"
+            return run
         finally:
             storage.close()
+
+    def get_results(self, run_id):
+        """Format saved comparison pressures and analysis as plain JSON data."""
+        run = self.get_run(run_id)
+        if run is None:
+            raise RunError("NOT_FOUND", run_id)
+        if run["status"] == "failed":
+            raise RunError("RUN_FAILED", run_id)
+        if run["status"] != "succeeded":
+            raise RunError("RESULTS_NOT_READY", run_id)
+        storage = SQLiteStorage(self.database_path)
+        try:
+            summary = storage.get_run_summary(run_id)
+            measurements = [
+                row
+                for row in storage.get_run_details(run_id)
+                if row["component_type"] == "node" and row["metric_name"] == "pressure"
+            ]
+        finally:
+            storage.close()
+        times = sorted({row["time_seconds"] for row in measurements})
+        positions = {time: index for index, time in enumerate(times)}
+        pressures = {"baseline": {}, "attack": {}}
+        for row in measurements:
+            series = pressures[row["case_name"]].setdefault(
+                row["component_id"], [None] * len(times)
+            )
+            series[positions[row["time_seconds"]]] = analysis.meters_to_psi(
+                row["value"]
+            )
+        return {
+            "run_id": run_id,
+            "scenario_id": run["scenario_id"],
+            "model_id": run["model_id"],
+            "status": "succeeded",
+            "units": {"time": "s", "pressure": "psi"},
+            "time_sec": times,
+            "pressures": pressures,
+            "analysis": summary.get("analysis", {}),
+            "timing": run["scenario_snapshot"]["timing"],
+            "wntr_version": run["metadata"]["wntr_version"],
+        }
 
     def close(self):
         """Wait for accepted runs to finish and release the worker."""
