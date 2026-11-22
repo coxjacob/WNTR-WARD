@@ -8,7 +8,7 @@ DASHBOARD = Path(__file__).resolve().parents[1] / "ward" / "dashboard.py"
 
 
 def test_preview_returns_network_and_comparable_pressure_series():  # validate that the /preview endpoint returns the expected junction IDs, network HTML, and sample pressure data
-    from ward.prototype_api import app
+    from ward.api import app
 
     response = TestClient(app).get("/preview")
 
@@ -27,7 +27,7 @@ def test_preview_returns_network_and_comparable_pressure_series():  # validate t
 def test_dashboard_loads_api_data_and_changes_selected_node(
     monkeypatch,
 ):  # validate that the dashboard loads API data and updates heading when a different node is selected
-    from ward.prototype_api import app
+    from ward.api import app
 
     client = TestClient(app)
     monkeypatch.setattr(httpx, "get", lambda url, **kwargs: client.get("/preview"))
@@ -63,7 +63,7 @@ def test_dashboard_explains_unavailable_api_and_can_retry(
     )
     assert not page.selectbox
 
-    from ward.prototype_api import app
+    from ward.api import app
 
     client = TestClient(app)
     monkeypatch.setattr(httpx, "get", lambda url, **kwargs: client.get("/preview"))
