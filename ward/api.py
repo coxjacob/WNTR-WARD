@@ -60,6 +60,9 @@ class RunStatus(BaseModel):
     scenario_id: str
     model_id: str
     status: Literal["queued", "running", "succeeded", "failed"]
+    created_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
     error: ErrorInfo | None = None
 
 
