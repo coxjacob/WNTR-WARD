@@ -248,12 +248,26 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
     page = AppTest.from_file(str(DASHBOARD)).run()
     assert not page.exception
 
-    # Click  da Run Scenario button
+    assert any(h.value == "Scenario Network Preview" for h in page.tabs[0].subheader)
+    assert not any(b.label == "View Results" for b in page.button)
+
+    # Submit the selected scenario.
     run_button = next(b for b in page.button if b.label == "Run Scenario")
     run_button.click().run()
 
     assert not page.exception
     assert any("succeeded" in s.value for s in page.success)
+
+    assert [tab.label for tab in page.tabs] == ["Scenario & Run", "Results"]
+    assert any(b.label == "Run Scenario" for b in page.tabs[0].button)
+    assert not page.tabs[1].button
+    assert page.tabs[1].dataframe
+    assert any(
+        "Simulation completed. Affected nodes: 1." in item.value
+        for item in page.tabs[0].info
+    )
+    assert not page.radio
+    assert not any("Connected API" in caption.value for caption in page.caption)
 
     metric_map = {m.label: m.value for m in page.metric}
     assert metric_map["Scenario ID"] == "scenario_pump_01"
@@ -270,6 +284,12 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
     assert not page.exception
     assert any("unaffected" in i.value.lower() for i in page.info)
     assert page.dataframe[0].value["Attack (psi)"].tolist() == [50.0, 49.0, 49.0, 50.0]
+
+    next(b for b in page.button if b.label == "View Results").click().run()
+    assert not page.exception
+    assert page.session_state["dashboard_tab"] == "Results"
+    assert page.session_state["active_run_id"] == "run-123"
+    assert page.session_state["selected_node"] == "J1"
 
 
 def test_dashboard_displays_failed_run_error_and_incomplete_state(monkeypatch):
@@ -336,6 +356,14 @@ def test_network_and_pressure_figures_match_analysis_and_handle_missing_coords()
         scenario=scenario,
         results=results,
         selected_node="J2",
+    )
+    preview = build_network_figure(topology, view_mode="preview", scenario=scenario)
+    target = next(t for t in preview.data if t.name == "Targeted pump")
+    assert list(target.customdata) == ["PU1"]
+    assert "Scenario target" in target.hovertext[0]
+    assert not any(
+        t.name in {"Affected nodes", "Unaffected junctions", "Attacked pump"}
+        for t in preview.data
     )
     assert base_fig is not None
     assert atk_fig is not None
@@ -460,12 +488,19 @@ def test_dashboard_stops_waiting_and_keeps_run_id(monkeypatch):
     monkeypatch.setattr(
         httpx,
         "Client",
-        _mock_client_factory({"/scenarios": (200, [_sample_scenario()])}),
+        _mock_client_factory(
+            {
+                "/scenarios": (200, [_sample_scenario()]),
+                "/models/ctown/topology": (200, _sample_topology()),
+            }
+        ),
     )
     page = AppTest.from_file(str(DASHBOARD)).run()
     page.session_state["active_run_id"] = "run-slow"
     page.session_state["run_wait_deadline"] = 0.0
     page.run()
     assert not page.exception
-    assert "Stopped waiting after one minute" in page.warning[0].value
+    assert any(
+        "Stopped waiting after one minute" in warning.value for warning in page.warning
+    )
     assert page.session_state["active_run_id"] == "run-slow"
