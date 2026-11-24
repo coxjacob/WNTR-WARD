@@ -248,3 +248,12 @@ def test_request_errors_and_openapi_match_the_contract(demo_api, monkeypatch):
         assert error.status_code == 500
         assert error.json()["error"]["code"] == "STORAGE_ERROR"
         assert str(database_path) not in error.text
+
+        def busy_read(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(SQLiteStorage, "list_scenarios", busy_read)
+        busy = client.get("/scenarios")
+        assert busy.status_code == 503
+        assert busy.json()["error"]["code"] == "STORAGE_BUSY"
+        assert busy.headers["Retry-After"] == "1"

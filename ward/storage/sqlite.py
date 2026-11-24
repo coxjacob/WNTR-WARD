@@ -21,6 +21,8 @@ class SQLiteStorage:
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
 
+        # Allow API status reads while the worker commits simulation results.
+        self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA foreign_keys = ON")
 
         self._apply_migrations()

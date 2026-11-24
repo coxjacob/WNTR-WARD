@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from streamlit.testing.v1 import AppTest
 
@@ -124,7 +125,7 @@ def _mock_client_factory(routes_get, routes_post=None):
         def __exit__(self, *args):
             return False
 
-        def get(self, path):
+        def get(self, path, **kwargs):
             handler = routes_get[path]
             status, payload = handler() if callable(handler) else handler
             return httpx.Response(
@@ -170,7 +171,7 @@ def test_dashboard_handles_unavailable_api_and_recovers(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def get(self, path):
+        def get(self, path, **kwargs):
             raise httpx.ConnectError("Connection refused")
 
     monkeypatch.setattr(httpx, "Client", FailingClient)
@@ -376,3 +377,95 @@ def test_dashboard_live_fastapi_integration(tmp_path, monkeypatch):
         )
         assert fig is not None
         assert len(fig.data) >= 4
+
+
+def test_run_reads_retry_transient_storage_error_without_resubmitting(monkeypatch):
+    from ward.dashboard import api_get_run_data
+
+    calls = []
+
+    class Client:
+        def get(self, path, **kwargs):
+            calls.append(path)
+            if len(calls) == 1:
+                return httpx.Response(
+                    500,
+                    json={
+                        "error": {
+                            "code": "STORAGE_ERROR",
+                            "message": "The saved data could not be read or written.",
+                        }
+                    },
+                    request=httpx.Request("GET", "http://test" + path),
+                )
+            return httpx.Response(
+                200,
+                json={"status": "running"},
+                request=httpx.Request("GET", "http://test" + path),
+            )
+
+    monkeypatch.setattr("ward.dashboard.time.sleep", lambda _: None)
+    assert api_get_run_data(Client(), "/runs/run-123") == {"status": "running"}
+    assert calls == ["/runs/run-123", "/runs/run-123"]
+
+
+@pytest.mark.parametrize(
+    "code, expected_calls", [("STORAGE_ERROR", 6), ("INPUT_ERROR", 1)]
+)
+def test_run_reads_surface_persistent_errors(monkeypatch, code, expected_calls):
+    from ward.dashboard import api_get_run_data
+
+    calls = []
+
+    class Client:
+        def get(self, path, **kwargs):
+            calls.append(path)
+            return httpx.Response(
+                500,
+                json={"error": {"code": code, "message": "failure"}},
+                request=httpx.Request("GET", "http://test" + path),
+            )
+
+    monkeypatch.setattr("ward.dashboard.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match=code):
+        api_get_run_data(Client(), "/runs/run-123")
+    assert len(calls) == expected_calls
+
+
+def test_run_wait_deadline_limits_retries(monkeypatch):
+    from ward.dashboard import RunWaitExpired, api_get_run_data
+
+    clock = [0.0]
+    calls = []
+
+    class Client:
+        def get(self, path, **kwargs):
+            calls.append(kwargs["timeout"])
+            return httpx.Response(
+                503, json={}, request=httpx.Request("GET", "http://test" + path)
+            )
+
+    monkeypatch.setattr("ward.dashboard.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "ward.dashboard.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    with pytest.raises(RunWaitExpired):
+        api_get_run_data(Client(), "/runs/run-123", deadline=1.0)
+    assert clock[0] == 1.0
+    assert calls == [1.0, 0.5]
+
+
+def test_dashboard_stops_waiting_and_keeps_run_id(monkeypatch):
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        _mock_client_factory({"/scenarios": (200, [_sample_scenario()])}),
+    )
+    page = AppTest.from_file(str(DASHBOARD)).run()
+    page.session_state["active_run_id"] = "run-slow"
+    page.session_state["run_wait_deadline"] = 0.0
+    page.run()
+    assert not page.exception
+    assert "Stopped waiting after one minute" in page.warning[0].value
+    assert page.session_state["active_run_id"] == "run-slow"

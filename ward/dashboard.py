@@ -10,6 +10,7 @@ DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_PRESSURE_THRESHOLD_PSI = 20.0
 POLL_INTERVAL_SEC = 0.5
 MAX_AUTO_POLLS = 60
+AUTO_WAIT_SECONDS = 60.0
 
 
 def get_api_base_url() -> str:
@@ -22,6 +23,45 @@ def api_get(client: httpx.Client, path: str) -> dict[str, Any] | list[Any]:
         detail = _extract_api_error(response)
         raise RuntimeError(detail)
     return response.json()
+
+
+class RunWaitExpired(TimeoutError):
+    """The UI waiting budget expired; the background run is unaffected."""
+
+
+def api_get_run_data(
+    client: httpx.Client, path: str, *, deadline: float | None = None
+) -> dict[str, Any] | list[Any]:
+    """Retry temporary read failures without ever repeating run submission."""
+    for attempt in range(6):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise RunWaitExpired
+        try:
+            response = (
+                client.get(path)
+                if remaining is None
+                else client.get(path, timeout=min(10.0, remaining))
+            )
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RunWaitExpired from None
+            if attempt == 5:
+                raise
+        else:
+            if response.status_code < 400:
+                return response.json()
+            detail = _extract_api_error(response)
+            retryable = response.status_code in {502, 503, 504} or (
+                response.status_code == 500 and detail.startswith("STORAGE_ERROR:")
+            )
+            if not retryable or attempt == 5:
+                raise RuntimeError(detail)
+        delay = min(0.5 * (2**attempt), 4.0)
+        if deadline is not None:
+            delay = min(delay, max(0.0, deadline - time.monotonic()))
+        time.sleep(delay)
+    raise RuntimeError("Run data could not be loaded.")
 
 
 def api_post(
@@ -588,26 +628,55 @@ def main() -> None:
             if run_clicked:
                 submitted = api_post(client, "/runs", {"scenario_id": scenario_id})
                 st.session_state["active_run_id"] = submitted["run_id"]
+                st.session_state["run_wait_deadline"] = (
+                    time.monotonic() + AUTO_WAIT_SECONDS
+                )
 
             run_status: dict[str, Any] | None = None
             results: dict[str, Any] | None = None
             active_run_id = st.session_state.get("active_run_id")
 
             if active_run_id:
-                run_status = api_get(client, f"/runs/{active_run_id}")
-                polls = 0
-                while (
-                    run_status.get("status") in {"queued", "running"}
-                    and polls < MAX_AUTO_POLLS
-                ):
-                    time.sleep(POLL_INTERVAL_SEC)
-                    run_status = api_get(client, f"/runs/{active_run_id}")
-                    polls += 1
+                if refresh_clicked or "run_wait_deadline" not in st.session_state:
+                    st.session_state["run_wait_deadline"] = (
+                        time.monotonic() + AUTO_WAIT_SECONDS
+                    )
+                deadline = st.session_state["run_wait_deadline"]
+                with st.spinner("Simulation in progress - waiting for run data..."):
+                    run_status = api_get_run_data(
+                        client, f"/runs/{active_run_id}", deadline=deadline
+                    )
+                    polls = 0
+                    while (
+                        run_status.get("status") in {"queued", "running"}
+                        and polls < MAX_AUTO_POLLS
+                    ):
+                        time.sleep(
+                            min(
+                                POLL_INTERVAL_SEC, max(0.0, deadline - time.monotonic())
+                            )
+                        )
+                        run_status = api_get_run_data(
+                            client, f"/runs/{active_run_id}", deadline=deadline
+                        )
+                        polls += 1
 
-                if run_status.get("status") == "succeeded":
-                    results = api_get(client, f"/runs/{active_run_id}/results")
+                    if run_status.get("status") == "succeeded":
+                        results = api_get_run_data(
+                            client, f"/runs/{active_run_id}/results", deadline=deadline
+                        )
+                if run_status.get("status") in {"queued", "running"}:
+                    st.rerun()
+                st.session_state.pop("run_wait_deadline", None)
 
             topology = api_get(client, f"/models/{model_id}/topology")
+    except RunWaitExpired:
+        st.warning(
+            "Stopped waiting after one minute. The simulation has not been cancelled. "
+            "Click Refresh Run Status to check the same run again."
+        )
+        st.caption(f"Run ID: {st.session_state.get('active_run_id')}")
+        st.stop()
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         st.error(f"API error while loading run or network data: {exc}")
         st.stop()

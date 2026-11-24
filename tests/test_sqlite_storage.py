@@ -414,3 +414,15 @@ def test_failed_upgrade_rolls_back_and_can_be_retried(tmp_path, monkeypatch):
         "SELECT version FROM schema_migrations WHERE version = 3"
     ).fetchone()
     db.close()
+
+
+def test_status_reads_continue_during_result_write(storage):
+    reader = SQLiteStorage(storage.database_path)
+    try:
+        storage.connection.execute("BEGIN EXCLUSIVE")
+        storage.connection.execute("UPDATE runs SET status = status")
+        reader.connection.execute("PRAGMA busy_timeout = 1")
+        assert reader.get_run("run_test_01")["status"] == "pending"
+    finally:
+        storage.connection.rollback()
+        reader.close()

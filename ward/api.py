@@ -31,6 +31,7 @@ ERRORS = {
     "SIMULATION_ERROR": (500, "The simulation could not be completed."),
     "CONVERGENCE_ERROR": (500, "The simulation did not converge."),
     "ANALYSIS_ERROR": (500, "The simulation results could not be analyzed."),
+    "STORAGE_BUSY": (503, "Storage is temporarily busy. Check the run status again."),
     "STORAGE_ERROR": (500, "The saved data could not be read or written."),
     "UNEXPECTED_ERROR": (
         500,
@@ -150,7 +151,9 @@ def create_app(database_path=None, model_paths=None):
     application = FastAPI(
         title="WARD demo API",
         lifespan=lifespan,
-        responses={status: {"model": ErrorResponse} for status in (404, 409, 422, 500)},
+        responses={
+            status: {"model": ErrorResponse} for status in (404, 409, 422, 500, 503)
+        },
     )
 
     async def handle_error(request, error):
@@ -164,14 +167,26 @@ def create_app(database_path=None, model_paths=None):
             code = "NOT_FOUND" if error.status_code == 404 else "INPUT_ERROR"
         else:
             code = "UNEXPECTED_ERROR"
+        cause = error.__cause__ or error
+        if isinstance(cause, sqlite3.OperationalError) and str(cause) in {
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+        }:
+            code = "STORAGE_BUSY"
         if code not in ERRORS:
             code = "UNEXPECTED_ERROR"
         status, message = ERRORS[code]
         if isinstance(error, HTTPException):
             status = error.status_code
-        logging.getLogger(__name__).error("%s", code, exc_info=error)
+        if code == "STORAGE_BUSY":
+            logging.getLogger(__name__).warning("%s", code)
+        else:
+            logging.getLogger(__name__).error("%s", code, exc_info=error)
         return JSONResponse(
-            status_code=status, content={"error": {"code": code, "message": message}}
+            status_code=status,
+            content={"error": {"code": code, "message": message}},
+            headers={"Retry-After": "1"} if code == "STORAGE_BUSY" else None,
         )
 
     for error_type in (
