@@ -1,16 +1,48 @@
+import math
 import os
 import time
 from typing import Any
 
 import httpx
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_PRESSURE_THRESHOLD_PSI = 20.0
+PRESSURE_DROP_YELLOW_PSI = 2.5
+PRESSURE_DROP_RED_PSI = 5.0
 POLL_INTERVAL_SEC = 0.5
 MAX_AUTO_POLLS = 60
 AUTO_WAIT_SECONDS = 60.0
+
+
+def _pressure_difference_row_style(row: pd.Series) -> list[str]:
+    """Color rows by pressure drop and new low-pressure impact criteria."""
+    baseline = row["Baseline (psi)"]
+    attack = row["Attack (psi)"]
+    try:
+        baseline = float(baseline)
+        attack = float(attack)
+    except (TypeError, ValueError):
+        return [""] * len(row)
+
+    if not math.isfinite(baseline) or not math.isfinite(attack):
+        return [""] * len(row)
+
+    pressure_difference = abs(attack - baseline)
+    new_low_pressure = (
+        baseline >= DEFAULT_PRESSURE_THRESHOLD_PSI
+        and attack < DEFAULT_PRESSURE_THRESHOLD_PSI
+    )
+
+    if pressure_difference >= PRESSURE_DROP_RED_PSI or new_low_pressure:
+        color = "background-color: #9b111e"
+    elif pressure_difference >= PRESSURE_DROP_YELLOW_PSI:
+        color = "background-color: #cca01d"
+    else:
+        color = ""
+    return [color] * len(row)
 
 
 def get_api_base_url() -> str:
@@ -576,7 +608,7 @@ def _show_results() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="WARD Attack Impact Dashboard", layout="wide")
-    st.title("WARD — Water Network Cyber-Attack Demo Dashboard")
+    st.title("WARD — Water Network Cyber-Attack Dashboard")
 
     api_url = get_api_base_url()
 
@@ -822,7 +854,7 @@ def main() -> None:
             else:
                 base_event = st.plotly_chart(
                     base_fig,
-                    width="stretch",
+                    use_container_width=True,
                     on_select="rerun",
                     key="baseline_network_plot",
                 )
@@ -843,7 +875,7 @@ def main() -> None:
             else:
                 atk_event = st.plotly_chart(
                     atk_fig,
-                    width="stretch",
+                    use_container_width=True,
                     on_select="rerun",
                     key="attack_network_plot",
                 )
@@ -889,16 +921,25 @@ def main() -> None:
                     )
 
                 pressure_fig = build_pressure_figure(results, selected_node)
-                st.plotly_chart(pressure_fig, width="stretch")
+                st.plotly_chart(pressure_fig, use_container_width=True)
 
                 time_hours = [round(float(t) / 3600.0, 3) for t in results["time_sec"]]
-                st.dataframe(
+                pressure_table = pd.DataFrame(
                     {
                         "Time (hours)": time_hours,
-                        "Time (s)": results["time_sec"],
                         "Baseline (psi)": base_vals,
                         "Attack (psi)": atk_vals,
-                    },
+                    }
+                )
+                st.caption(
+                    "Row color: yellow for a pressure drop of at least 2.5 psi; red for "
+                    "a drop of at least 5 psi or a drop below 20 psi from a baseline "
+                    "of 20 psi or higher."
+                )
+                st.dataframe(
+                    pressure_table.style.apply(
+                        _pressure_difference_row_style, axis=1
+                    ).format({"Time (hours)": "{:.2f}"}),
                     hide_index=True,
                 )
 
