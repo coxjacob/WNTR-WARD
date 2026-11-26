@@ -220,7 +220,13 @@ def _apply_pump_outage(network, scenario):
 
 @contextmanager
 def _stored_run(
-    scenario, network_path, storage, run_id=None, *, initial_status="running"
+    scenario,
+    network_path,
+    storage,
+    run_id=None,
+    *,
+    initial_status="running",
+    custom=False,
 ):
     owned = storage is None
     if owned:
@@ -246,10 +252,11 @@ def _stored_run(
                 storage.register_model(
                     {"model_id": scenario.model_id, "name": scenario.model_id}
                 )
-            if storage.get_scenario(scenario.scenario_id) is None:
-                storage.create_scenario(definition)
-            else:
-                storage.update_scenario(scenario.scenario_id, definition)
+            if not custom:
+                if storage.get_scenario(scenario.scenario_id) is None:
+                    storage.create_scenario(definition)
+                else:
+                    storage.update_scenario(scenario.scenario_id, definition)
             with _run_stage("MODEL_LOADING_ERROR"):
                 metadata = {
                     "network_path": str(Path(network_path).resolve()),
@@ -265,7 +272,8 @@ def _stored_run(
                     "model_id": scenario.model_id,
                     "status": initial_status,
                     "metadata": metadata,
-                }
+                },
+                scenario_snapshot=definition if custom else None,
             )
         saved_run = True
         yield storage, run_id
@@ -473,7 +481,7 @@ class RunManager:
         ).resolve()
         self._executor = ThreadPoolExecutor(max_workers=1)
 
-    def submit(self, scenario_path, network_path):
+    def submit(self, scenario_path, network_path, *, custom=False):
         """Save a pending run and return its ID without waiting for simulation."""
         with _run_stage("INPUT_ERROR"):
             scenario = _load_pump_scenario(scenario_path)
@@ -482,7 +490,7 @@ class RunManager:
         storage = SQLiteStorage(self.database_path)
         try:
             with _stored_run(
-                scenario, network_path, storage, initial_status="pending"
+                scenario, network_path, storage, initial_status="pending", custom=custom
             ) as (_, run_id):
                 self._executor.submit(self._execute, run_id)
             return run_id
@@ -561,11 +569,15 @@ class RunManager:
             "scenario_id": run["scenario_id"],
             "model_id": run["model_id"],
             "status": "succeeded",
+            "created_at": run.get("created_at"),
+            "started_at": run.get("started_at"),
+            "completed_at": run.get("completed_at"),
             "units": {"time": "s", "pressure": "psi"},
             "time_sec": times,
             "pressures": pressures,
             "analysis": summary.get("analysis", {}),
             "timing": run["scenario_snapshot"]["timing"],
+            "scenario_snapshot": run["scenario_snapshot"],
             "wntr_version": run["metadata"]["wntr_version"],
         }
 

@@ -21,6 +21,8 @@ class SQLiteStorage:
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
 
+        # Allow API status reads while the worker commits simulation results.
+        self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA foreign_keys = ON")
 
         self._apply_migrations()
@@ -204,7 +206,7 @@ class SQLiteStorage:
             self.connection.rollback()
             raise ValueError("Cannot delete a scenario with historical runs") from exc
 
-    def save_run(self, run: dict[str, Any]) -> None:
+    def save_run(self, run: dict[str, Any], *, scenario_snapshot=None) -> None:
         """Save a simulation run and its scenario snapshot."""
 
         run_id = run["run_id"]
@@ -220,8 +222,15 @@ class SQLiteStorage:
         if existing is not None:
             raise ValueError(f"Run already exists: {run_id}")
 
-        scenario = self.get_scenario(scenario_id)
+        library_scenario_id = scenario_id if scenario_snapshot is None else None
+        scenario = (
+            self.get_scenario(scenario_id)
+            if scenario_snapshot is None
+            else WaterScenario.model_validate(scenario_snapshot).model_dump(mode="json")
+        )
 
+        if scenario is not None and scenario["scenario_id"] != scenario_id:
+            raise ValueError("Run scenario ID does not match snapshot")
         if scenario is None:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
 
@@ -247,9 +256,10 @@ class SQLiteStorage:
                     scenario_snapshot,
                     status,
                     metadata_json,
+                    library_scenario_id,
                     started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?,
+                VALUES (?, ?, ?, ?, ?, ?, ?,
                     CASE WHEN ? = 'running'
                     THEN CURRENT_TIMESTAMP ELSE NULL END)
                 """,
@@ -260,6 +270,7 @@ class SQLiteStorage:
                     scenario_snapshot,
                     status,
                     metadata_json,
+                    library_scenario_id,
                     status,
                 ),
             )
@@ -299,6 +310,7 @@ class SQLiteStorage:
             return None
 
         run = dict(row)
+        run.pop("library_scenario_id", None)
 
         run["scenario_snapshot"] = json.loads(run["scenario_snapshot"])
         run["metadata"] = json.loads(run.pop("metadata_json"))
@@ -476,10 +488,17 @@ class SQLiteStorage:
             sql = migration_file.read_text(encoding="utf-8")
 
             try:
-                self.connection.executescript(f"BEGIN;\n{sql}\nCOMMIT;")
+                if version == 3:
+                    self.connection.execute("PRAGMA foreign_keys = OFF")
+                self.connection.executescript(f"BEGIN;\n{sql}")
+                if self.connection.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("Migration would break run references")
+                self.connection.commit()
             except sqlite3.Error:
                 self.connection.rollback()
                 raise
+            finally:
+                self.connection.execute("PRAGMA foreign_keys = ON")
 
     def save_run_summary(self, run_id: str, summary: dict[str, Any]) -> None:
         """Save simulation summary information as JSON."""

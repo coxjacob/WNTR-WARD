@@ -232,7 +232,7 @@ def test_request_errors_and_openapi_match_the_contract(demo_api, monkeypatch):
         ):
             assert path in schema["paths"]
         request_schema = schema["components"]["schemas"]["RunRequest"]
-        assert request_schema["required"] == ["scenario_id"]
+        assert set(request_schema["properties"]) == {"scenario_id", "scenario"}
         assert request_schema["properties"]["scenario_id"]["examples"] == [
             "scenario_pump_01"
         ]
@@ -248,3 +248,101 @@ def test_request_errors_and_openapi_match_the_contract(demo_api, monkeypatch):
         assert error.status_code == 500
         assert error.json()["error"]["code"] == "STORAGE_ERROR"
         assert str(database_path) not in error.text
+
+        def busy_read(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(SQLiteStorage, "list_scenarios", busy_read)
+        busy = client.get("/scenarios")
+        assert busy.status_code == 503
+        assert busy.json()["error"]["code"] == "STORAGE_BUSY"
+        assert busy.headers["Retry-After"] == "1"
+
+
+@pytest.mark.simulation
+def test_custom_run_is_not_saved_as_a_scenario(tmp_path):
+    from ward.api import create_app
+
+    database = tmp_path / "custom.sqlite"
+    app = create_app(database)
+    with TestClient(app) as client:
+        assert {m["model_id"] for m in client.get("/models").json()} >= {
+            "ctown",
+            "net1",
+        }
+        assert client.get("/attack-types").json()[0]["attack_type"] == "pump_off"
+        before = client.get("/scenarios").json()
+        response = client.post(
+            "/runs",
+            json={
+                "scenario": {
+                    "name": "Custom outage",
+                    "model_id": "net1",
+                    "attack_type": "pump_off",
+                    "target_components": ["9"],
+                    "timing": {"start_time_sec": 3600, "duration_sec": 3600},
+                }
+            },
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run_id"]
+        assert client.get("/scenarios").json() == before
+    with TestClient(create_app(database)) as client:
+        assert client.get(f"/runs/{run_id}").json()["status"] == "succeeded"
+        assert client.get(f"/runs/{run_id}/results").json()["scenario_snapshot"][
+            "target_components"
+        ] == ["9"]
+        assert client.get("/scenarios").json() == before
+
+
+def test_custom_run_rejects_invalid_configuration_before_queueing(tmp_path):
+    from ward.api import create_app
+
+    with TestClient(create_app(tmp_path / "invalid.sqlite")) as client:
+        scenario = {
+            "name": "Outage",
+            "model_id": "net1",
+            "attack_type": "pump_off",
+            "target_components": ["10"],
+            "timing": {"start_time_sec": 0, "duration_sec": 3600},
+        }
+        assert client.post("/runs", json={"scenario": scenario}).status_code == 422
+        scenario["target_components"] = ["9"]
+        for changes in (
+            {"attack_type": "valve_closure"},
+            {"target_components": []},
+            {"parameters": {"unused": 1}},
+            {"timing": {"start_time_sec": -1, "duration_sec": 1}},
+        ):
+            assert (
+                client.post("/runs", json={"scenario": scenario | changes}).status_code
+                == 422
+            )
+        assert client.post("/runs", json={}).status_code == 422
+        assert (
+            client.post(
+                "/runs", json={"scenario_id": "scenario_pump_01", "scenario": scenario}
+            ).status_code
+            == 422
+        )
+
+
+def test_packaged_models_are_available(tmp_path):
+    from ward.api import create_app
+
+    with TestClient(create_app(tmp_path / "models.sqlite")) as client:
+        models = client.get("/models").json()
+        assert {model["model_id"] for model in models} == {
+            "ctown",
+            "net1",
+            "net2",
+            "net3",
+            "net6",
+            "ky4",
+            "ky10",
+        }
+        for model in models:
+            response = client.get(f"/models/{model['model_id']}/topology")
+            assert response.status_code == 200
+            assert response.json()["nodes"]
+            assert response.json()["links"]

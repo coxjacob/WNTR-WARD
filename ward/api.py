@@ -4,11 +4,12 @@ import sqlite3
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from starlette.exceptions import HTTPException
 
 from ward.scenario import ScenarioTiming, WaterScenario
@@ -31,6 +32,7 @@ ERRORS = {
     "SIMULATION_ERROR": (500, "The simulation could not be completed."),
     "CONVERGENCE_ERROR": (500, "The simulation did not converge."),
     "ANALYSIS_ERROR": (500, "The simulation results could not be analyzed."),
+    "STORAGE_BUSY": (503, "Storage is temporarily busy. Check the run status again."),
     "STORAGE_ERROR": (500, "The saved data could not be read or written."),
     "UNEXPECTED_ERROR": (
         500,
@@ -50,9 +52,36 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
+class CustomScenario(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str = Field(min_length=1, pattern=r"\S", max_length=200)
+    model_id: str = Field(min_length=1)
+    attack_type: Literal["pump_off"]
+    target_components: list[str] = Field(min_length=1, max_length=1)
+    timing: ScenarioTiming
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_parameters(self):
+        if self.parameters:
+            raise ValueError("Pump shutdown does not accept parameters")
+        if self.timing.start_time_sec + self.timing.duration_sec > 604800:
+            raise ValueError("Attack must end within seven days")
+        return self
+
+
 class RunRequest(BaseModel):
     model_config = {"extra": "forbid"}
-    scenario_id: str = Field(min_length=1, pattern=r"\S", examples=["scenario_pump_01"])
+    scenario_id: str | None = Field(
+        default=None, min_length=1, pattern=r"\S", examples=["scenario_pump_01"]
+    )
+    scenario: CustomScenario | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if (self.scenario_id is None) == (self.scenario is None):
+            raise ValueError("Provide either scenario_id or scenario")
+        return self
 
 
 class RunStatus(BaseModel):
@@ -60,6 +89,9 @@ class RunStatus(BaseModel):
     scenario_id: str
     model_id: str
     status: Literal["queued", "running", "succeeded", "failed"]
+    created_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
     error: ErrorInfo | None = None
 
 
@@ -80,6 +112,7 @@ class RunResults(RunStatus):
     )
     analysis: dict[str, Any]
     timing: ScenarioTiming
+    scenario_snapshot: WaterScenario
     wntr_version: str
 
 
@@ -125,15 +158,26 @@ def create_app(database_path=None, model_paths=None):
     models = (
         model_paths
         if model_paths is not None
-        else {"ctown": root.parent / "examples" / "networks" / "CTOWN.inp"}
+        else {
+            "ctown": root.parent / "examples" / "networks" / "CTOWN.inp",
+            "net1": root.parent / "wntr" / "library" / "networks" / "Net1.inp",
+            "net2": root.parent / "wntr" / "library" / "networks" / "Net2.inp",
+            "net3": root.parent / "wntr" / "library" / "networks" / "Net3.inp",
+            "net6": root.parent / "wntr" / "library" / "networks" / "Net6.inp",
+            "ky4": root.parent / "wntr" / "library" / "networks" / "ky4.inp",
+            "ky10": root.parent / "wntr" / "library" / "networks" / "ky10.inp",
+        }
     )
 
     @asynccontextmanager
     async def lifespan(application):
         with _storage(database_path) as storage:
+            for model_id in models:
+                if storage.get_model(model_id) is None:
+                    storage.register_model(
+                        {"model_id": model_id, "name": model_id.upper()}
+                    )
             if "ctown" in models and storage.get_scenario("scenario_pump_01") is None:
-                if storage.get_model("ctown") is None:
-                    storage.register_model({"model_id": "ctown", "name": "CTOWN"})
                 scenario = WaterScenario.load_from_json(
                     root / "scenarios" / "pump_poweroff_basic.json"
                 )
@@ -147,7 +191,9 @@ def create_app(database_path=None, model_paths=None):
     application = FastAPI(
         title="WARD demo API",
         lifespan=lifespan,
-        responses={status: {"model": ErrorResponse} for status in (404, 409, 422, 500)},
+        responses={
+            status: {"model": ErrorResponse} for status in (404, 409, 422, 500, 503)
+        },
     )
 
     async def handle_error(request, error):
@@ -161,14 +207,26 @@ def create_app(database_path=None, model_paths=None):
             code = "NOT_FOUND" if error.status_code == 404 else "INPUT_ERROR"
         else:
             code = "UNEXPECTED_ERROR"
+        cause = error.__cause__ or error
+        if isinstance(cause, sqlite3.OperationalError) and str(cause) in {
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+        }:
+            code = "STORAGE_BUSY"
         if code not in ERRORS:
             code = "UNEXPECTED_ERROR"
         status, message = ERRORS[code]
         if isinstance(error, HTTPException):
             status = error.status_code
-        logging.getLogger(__name__).error("%s", code, exc_info=error)
+        if code == "STORAGE_BUSY":
+            logging.getLogger(__name__).warning("%s", code)
+        else:
+            logging.getLogger(__name__).error("%s", code, exc_info=error)
         return JSONResponse(
-            status_code=status, content={"error": {"code": code, "message": message}}
+            status_code=status,
+            content={"error": {"code": code, "message": message}},
+            headers={"Retry-After": "1"} if code == "STORAGE_BUSY" else None,
         )
 
     for error_type in (
@@ -196,6 +254,21 @@ def create_app(database_path=None, model_paths=None):
                 raise RunError("NOT_FOUND", scenario_id)
             return scenario
 
+    @application.get("/models")
+    def list_models():
+        return [{"model_id": model_id, "name": model_id.upper()} for model_id in models]
+
+    @application.get("/attack-types")
+    def list_attack_types():
+        return [
+            {
+                "attack_type": "pump_off",
+                "name": "Pump shutdown",
+                "target_type": "Pump",
+                "target_count": 1,
+            }
+        ]
+
     @application.get("/models/{model_id}/topology", response_model=NetworkTopology)
     def topology(model_id: str):
         """Return network assets, connectivity, and model coordinates."""
@@ -205,17 +278,36 @@ def create_app(database_path=None, model_paths=None):
 
     @application.post("/runs", status_code=202, response_model=RunStatus)
     def submit_run(body: RunRequest):
-        """Queue a saved scenario and return the run ID for status polling."""
-        with _storage(database_path) as storage:
-            definition = storage.get_scenario(body.scenario_id)
-        if definition is None:
-            raise RunError("NOT_FOUND", body.scenario_id)
-        scenario = WaterScenario.model_validate(definition)
+        """Queue a saved scenario or custom configuration for status polling."""
+        if body.scenario is not None:
+            scenario = WaterScenario(
+                scenario_id=f"custom_{uuid4().hex}",
+                **body.scenario.model_dump(),
+            )
+            if scenario.model_id not in models:
+                raise RunError("INPUT_ERROR", "Unknown model")
+            network = load_network_topology(models[scenario.model_id])
+            pumps = {
+                link["link_id"] for link in network["links"] if link["type"] == "Pump"
+            }
+            if scenario.target_components[0] not in pumps:
+                raise RunError("INPUT_ERROR", "Select a pump in the chosen network")
+        else:
+            with _storage(database_path) as storage:
+                definition = storage.get_scenario(body.scenario_id)
+            if definition is None:
+                raise RunError("NOT_FOUND", body.scenario_id)
+            scenario = WaterScenario.model_validate(definition)
         if scenario.model_id not in models:
             raise RunError("NOT_FOUND", scenario.model_id)
-        run_id = application.state.run_manager.submit(
-            scenario, models[scenario.model_id]
-        )
+        if body.scenario is None:
+            run_id = application.state.run_manager.submit(
+                scenario, models[scenario.model_id]
+            )
+        else:
+            run_id = application.state.run_manager.submit(
+                scenario, models[scenario.model_id], custom=True
+            )
         return {
             "run_id": run_id,
             "scenario_id": scenario.scenario_id,

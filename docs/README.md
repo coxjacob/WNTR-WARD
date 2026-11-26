@@ -59,6 +59,21 @@ shutdown to wait for accepted runs to finish. Queued runs use their saved
 scenario snapshots.
 The queue is in memory.
 
+## Custom dashboard runs
+
+The dashboard offers predefined scenarios and custom configurations. Custom runs
+let users choose CTOWN, Net1, Net2, Net3, Net6, ky4, or ky10, a single pump,
+and shutdown start/duration in hours. Pump shutdown is currently the only executable custom attack. Attack
+windows must end within seven days. Net2 has no pumps and supports preview only.
+
+FastAPI exposes available models at `GET /models` and supported attacks at
+`GET /attack-types`. Submit `POST /runs` with either `scenario_id` for a saved
+scenario or `scenario` containing `name`, `model_id`, `attack_type`,
+`target_components`, and `timing` (`start_time_sec`, `duration_sec`). Custom
+configurations are validated before queueing and are never added to the scenario
+library. Each run retains its own configuration snapshot, returned with results.
+The database upgrades existing runs automatically on startup.
+
 ## Structure and responsibilities
 
 | Location | Purpose |
@@ -130,17 +145,14 @@ scenario if it is not already saved; shutdown waits for accepted runs to finish.
 | `GET /scenarios` | List saved scenario definitions |
 | `GET /scenarios/{scenario_id}` | Retrieve a scenario |
 | `GET /models/{model_id}/topology` | Retrieve nodes, links, model coordinates, and visualization metadata |
-| `POST /runs` | Submit `{"scenario_id": "scenario_pump_01"}`; return HTTP 202 with run, scenario, and model IDs |
+| `POST /runs` | Submit a saved `scenario_id` or custom `scenario`; return HTTP 202 with run, scenario, and model IDs |
 | `GET /runs/{run_id}` | Poll queued, running, succeeded, or failed status |
 | `GET /runs/{run_id}/results` | Retrieve saved pressures and affected-node analysis |
 
-Requests select saved scenarios, not local file paths. The initial configuration
-maps the `ctown` model ID to the bundled CTOWN network; `create_app()` accepts
-other model mappings for integration and tests. The runner currently supports
-pump outages. The response fields use scenario, model, and node IDs rather than
-hardcoded attack targets, so the dashboard can reuse them for other scenarios.
-Confirm this initial contract with the dashboard developer before connecting
-the UI in TASK-10.
+Requests select a saved scenario or supply a custom configuration, using a
+configured model ID rather than a local file path. All seven packaged models
+are configured by default; `create_app()` accepts other model mappings for
+integration and tests. The runner currently supports pump outages.
 
 Results include `time_sec`, `pressures.baseline[node_id]`,
 `pressures.attack[node_id]`, `units`, `timing`, `wntr_version`, and `analysis`.
@@ -156,10 +168,10 @@ and server failures 500. Failed jobs are retrieved with HTTP 200 and
 `CONVERGENCE_ERROR`, `ANALYSIS_ERROR`, `STORAGE_ERROR`, and `UNEXPECTED_ERROR`.
 Debugging details remain in logs and storage, not HTTP responses.
 
-## Dashboard prototype
+## Running the dashboard
 
-The Streamlit prototype still uses `/preview` to display the bundled Net3
-network and sample pressure curves. Connecting it to real runs is TASK-10.
+The Streamlit dashboard uses FastAPI for model previews, scenario submission,
+run status, and baseline-versus-attack pressure results.
 
 After `uv sync --locked`, start the API from the repository directory:
 

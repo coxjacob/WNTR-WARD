@@ -104,7 +104,7 @@ class MemoryStorage:
 
     # Simulation run operations
 
-    def save_run(self, run):
+    def save_run(self, run, *, scenario_snapshot=None):
         """Save a pending or running record using the Storage run contract."""
         run_id = run["run_id"]
         scenario_id = run["scenario_id"]
@@ -114,13 +114,20 @@ class MemoryStorage:
         if run_id in self.runs:
             raise ValueError(f"Run already exists: {run_id}")
 
-        if scenario_id not in self.scenarios:
+        scenario = (
+            self.scenarios.get(scenario_id)
+            if scenario_snapshot is None
+            else WaterScenario.model_validate(scenario_snapshot).model_dump(mode="json")
+        )
+        if scenario is None:
             raise KeyError(f"Scenario does not exist: {scenario_id}")
+        if scenario["scenario_id"] != scenario_id:
+            raise ValueError("Run scenario ID does not match snapshot")
 
         if model_id not in self.models:
             raise KeyError(f"Model does not exist: {model_id}")
 
-        if self.scenarios[scenario_id]["model_id"] != model_id:
+        if scenario["model_id"] != model_id:
             raise ValueError("Run model does not match scenario model")
 
         if status not in ALLOWED_STATUSES:
@@ -135,7 +142,7 @@ class MemoryStorage:
             "scenario_id": scenario_id,
             "model_id": model_id,
             "status": status,
-            "scenario_snapshot": deepcopy(self.scenarios[scenario_id]),
+            "scenario_snapshot": deepcopy(scenario),
             "metadata": run_metadata(run),
             "created_at": now,
             "started_at": now if status == "running" else None,
