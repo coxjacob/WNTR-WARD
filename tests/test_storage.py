@@ -427,3 +427,16 @@ def test_run_configuration_requires_explicit_metadata(
     with pytest.raises(ValueError, match="metadata"):
         storage.save_run(sample_run)
     assert storage.get_run(sample_run["run_id"]) is None
+
+
+def test_run_can_use_an_unsaved_snapshot(
+    storage, sample_model, sample_scenario, sample_run
+):
+    storage.register_model(sample_model)
+    storage.save_run(sample_run, scenario_snapshot=sample_scenario)
+    sample_scenario["name"] = "Changed draft"
+    assert storage.list_scenarios() == []
+    assert (
+        storage.get_run(sample_run["run_id"])["scenario_snapshot"]["name"]
+        == "Test Pump Failure"
+    )

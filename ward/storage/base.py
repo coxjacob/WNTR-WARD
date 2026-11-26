@@ -64,8 +64,8 @@ class Storage(Protocol):
         ...
 
     # Simulation run operations
-    def save_run(self, run: dict[str, Any]) -> None:
-        """Save a pending or running record and its scenario snapshot.
+    def save_run(self, run: dict[str, Any], *, scenario_snapshot=None) -> None:
+        """Save a run, optionally using a snapshot without a library entry.
 
         Parameters
         ----------

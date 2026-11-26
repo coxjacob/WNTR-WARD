@@ -261,7 +261,7 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
 
     assert any(h.value == "Network preview" for h in page.subheader)
     assert [tab.label for tab in page.tabs] == ["Scenario & Run", "Results"]
-    assert not page.radio
+    assert page.radio[0].value == "Predefined scenario"
     assert not any(b.label == "View Results" for b in page.button)
 
     # Submit the selected scenario.
@@ -396,7 +396,7 @@ def test_network_and_pressure_figures_match_analysis_and_handle_missing_coords()
     )
     preview = build_network_figure(topology, view_mode="preview", scenario=scenario)
     target = next(t for t in preview.data if t.name == "Targeted pump")
-    assert list(target.customdata) == ["PU1"]
+    assert list(target.customdata) == [{"link_id": "PU1"}]
     assert "Scenario target" in target.hovertext[0]
     assert not any(
         t.name in {"Affected nodes", "Unaffected junctions", "Attacked pump"}
@@ -408,7 +408,7 @@ def test_network_and_pressure_figures_match_analysis_and_handle_missing_coords()
     assert list(affected_trace.customdata) == ["J2"]
     assert not any(t.name == "Affected nodes" for t in base_fig.data)
     attacked_pump_trace = next(t for t in atk_fig.data if t.name == "Attacked pump")
-    assert list(attacked_pump_trace.customdata) == ["PU1"]
+    assert list(attacked_pump_trace.customdata) == [{"link_id": "PU1"}]
     p_fig = build_pressure_figure(results, "J2")
     assert list(p_fig.data[0].y) == results["pressures"]["baseline"]["J2"]
     assert list(p_fig.data[1].y) == results["pressures"]["attack"]["J2"]
@@ -563,3 +563,183 @@ def test_dashboard_stops_waiting_and_keeps_run_id(monkeypatch):
     assert page.session_state["dashboard_tab"] == "Results"
     assert page.dataframe
     assert not any(b.label == "Check Run Status" for b in page.button)
+
+
+def test_custom_dashboard_without_saved_scenarios(monkeypatch):
+    submissions = []
+
+    def submit(payload):
+        submissions.append(payload)
+        return 202, {"run_id": "custom-run", "status": "queued"}
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        _mock_client_factory(
+            {
+                "/scenarios": (200, []),
+                "/models": (200, [{"model_id": "ctown", "name": "CTOWN"}]),
+                "/attack-types": (
+                    200,
+                    [
+                        {
+                            "attack_type": "pump_off",
+                            "name": "Pump shutdown",
+                            "target_type": "Pump",
+                            "target_count": 1,
+                        }
+                    ],
+                ),
+                "/models/ctown/topology": (200, _sample_topology()),
+                "/runs/custom-run": (
+                    200,
+                    {"run_id": "custom-run", "status": "succeeded"},
+                ),
+                "/runs/custom-run/results": (200, _sample_results("custom-run")),
+            },
+            routes_post={"/runs": submit},
+        ),
+    )
+    page = AppTest.from_file(str(DASHBOARD)).run()
+    page.radio[0].set_value("Custom scenario").run()
+    assert not page.exception
+    assert [s.label for s in page.selectbox][:3] == [
+        "Water network model",
+        "Attack type",
+        "Target pump",
+    ]
+    page.number_input[0].set_value(2.0)
+    page.number_input[1].set_value(1.0)
+    next(b for b in page.button if b.label == "Run Scenario").click().run()
+    assert not page.exception
+    assert len(submissions) == 1
+    assert "scenario_id" not in submissions[0]
+    assert submissions[0]["scenario"]["target_components"] == ["PU1"]
+    assert submissions[0]["scenario"]["timing"] == {
+        "start_time_sec": 7200,
+        "duration_sec": 3600,
+    }
+    page.number_input[0].set_value(3.0).run()
+    assert "active_run_id" not in page.session_state
+
+
+def test_custom_model_change_updates_targets_and_handles_no_pumps(monkeypatch):
+    net1 = _sample_topology()
+    net1["links"][0]["link_id"] = "9"
+    empty = _sample_topology()
+    empty["links"] = [link for link in empty["links"] if link["type"] != "Pump"]
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        _mock_client_factory(
+            {
+                "/scenarios": (200, []),
+                "/models": (
+                    200,
+                    [{"model_id": m, "name": m} for m in ["ctown", "net1", "empty"]],
+                ),
+                "/attack-types": (
+                    200,
+                    [{"attack_type": "pump_off", "name": "Pump shutdown"}],
+                ),
+                "/models/ctown/topology": (200, _sample_topology()),
+                "/models/net1/topology": (200, net1),
+                "/models/empty/topology": (200, empty),
+            }
+        ),
+    )
+    page = AppTest.from_file(str(DASHBOARD)).run()
+    page.radio[0].set_value("Custom scenario").run()
+    assert page.selectbox[2].value == "PU1"
+    page.selectbox[0].set_value("net1").run()
+    assert not page.exception
+    assert page.selectbox[2].options == ["9"]
+    assert page.selectbox[2].value == "9"
+    page.selectbox[0].set_value("empty").run()
+    assert not page.exception
+    assert any("no pumps" in message.value for message in page.warning)
+    assert next(
+        button for button in page.button if button.label == "Run Scenario"
+    ).disabled
+    assert len(page.get("plotly_chart")) >= 1
+
+
+def test_network_omits_invalid_geometry_and_explains_it():
+    coordinates = [float("nan"), 0]
+    topology = {
+        "nodes": [
+            {"node_id": "A", "coordinates": [0, 0]},
+            {"node_id": "B", "coordinates": coordinates},
+        ],
+        "links": [
+            {"link_id": "pump", "type": "Pump", "start_node": "A", "end_node": "B"}
+        ],
+    }
+    figure = build_network_figure(topology, view_mode="preview")
+    assert not any(t.mode == "lines" for t in figure.data)
+    assert "1 node" in figure.layout.annotations[0].text
+    assert "1 link" in figure.layout.annotations[0].text
+    assert figure.layout.xaxis.range[0] < 0 < figure.layout.xaxis.range[1]
+
+
+@pytest.mark.parametrize("link_type", ["Pump", "Valve"])
+def test_equipment_selection_does_not_select_node_with_same_id(monkeypatch, link_type):
+    from ward import dashboard
+
+    topology = {
+        "nodes": [
+            {"node_id": "9", "coordinates": [0, 0]},
+            {"node_id": "10", "coordinates": [10, 0]},
+        ],
+        "links": [
+            {"link_id": "9", "type": link_type, "start_node": "9", "end_node": "10"}
+        ],
+    }
+    figure = build_network_figure(topology, view_mode="preview")
+    equipment = next(trace for trace in figure.data if trace.mode == "markers+text")
+    state = {"selected_node": "10"}
+    monkeypatch.setattr(dashboard.st, "session_state", state)
+    dashboard._sync_node_from_plot_selection(
+        {"selection": {"points": [{"customdata": equipment.customdata[0]}]}},
+        ["9", "10"],
+    )
+    assert state["selected_node"] == "10"
+    node = next(trace for trace in figure.data if trace.name == "Junctions")
+    dashboard._sync_node_from_plot_selection(
+        {"selection": {"points": [{"customdata": node.customdata[0]}]}}, ["9", "10"]
+    )
+    assert state["selected_node"] == "9"
+
+
+def test_network_draws_equipment_paths_and_fits_bends():
+    topology = {
+        "nodes": [
+            {"node_id": "A", "coordinates": [0, 0]},
+            {"node_id": "B", "coordinates": [10, 0]},
+            {"node_id": "C", "coordinates": [20, 0]},
+        ],
+        "links": [
+            {
+                "link_id": "pump",
+                "type": "Pump",
+                "start_node": "A",
+                "end_node": "B",
+                "vertices": [[0, 100], [10, 100]],
+            },
+            {"link_id": "valve", "type": "Valve", "start_node": "B", "end_node": "C"},
+        ],
+    }
+    figure = build_network_figure(
+        topology, view_mode="preview", scenario={"target_components": ["pump"]}
+    )
+    paths = [trace for trace in figure.data if trace.mode == "lines"]
+    assert [(list(trace.x), list(trace.y)) for trace in paths] == [
+        ([0, 0, 10, 10, None], [0, 100, 100, 0, None]),
+        ([10, 20, None], [0, 0, None]),
+    ]
+    pump = next(trace for trace in figure.data if trace.name == "Targeted pump")
+    valve = next(trace for trace in figure.data if trace.name == "Valves")
+    assert (pump.x[0], pump.y[0]) == pytest.approx((5, 100))
+    assert (valve.x[0], valve.y[0]) == pytest.approx((15, 0))
+    assert figure.layout.yaxis.range[1] > 100
+    assert figure.layout.yaxis.scaleanchor == "x"

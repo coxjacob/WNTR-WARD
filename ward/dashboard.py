@@ -1,7 +1,10 @@
+import hashlib
+import json
 import math
 import os
 import time
 from contextlib import ExitStack
+from itertools import pairwise
 from typing import Any
 
 import httpx
@@ -94,7 +97,6 @@ def api_get_run_data(
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - time.monotonic()))
         time.sleep(delay)
-    raise RuntimeError("Run data could not be loaded.")
 
 
 def api_post(
@@ -149,6 +151,30 @@ def _window_hours(timing: dict[str, Any] | None) -> tuple[float, float]:
     return start_hr, end_hr
 
 
+def _coordinate_pair(value: Any) -> tuple[float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        pair = (float(value[0]), float(value[1]))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return pair if all(math.isfinite(v) for v in pair) else None
+
+
+def _path_midpoint(path: list[tuple[float, float]]) -> tuple[float, float]:
+    lengths = [math.dist(start, end) for start, end in pairwise(path)]
+    remaining = sum(lengths) / 2
+    for start, end, length in zip(path, path[1:], lengths):
+        if length > 0 and remaining <= length:
+            fraction = remaining / length
+            return (
+                start[0] + fraction * (end[0] - start[0]),
+                start[1] + fraction * (end[1] - start[1]),
+            )
+        remaining -= length
+    return path[0]
+
+
 def build_network_figure(
     topology: dict[str, Any],
     *,
@@ -167,14 +193,9 @@ def build_network_figure(
     missing_coords = 0
 
     for node in nodes:
-        coords = node.get("coordinates")
-        if (
-            isinstance(coords, (list, tuple))
-            and len(coords) >= 2
-            and coords[0] is not None
-            and coords[1] is not None
-        ):
-            coord_map[str(node["node_id"])] = (float(coords[0]), float(coords[1]))
+        coords = _coordinate_pair(node.get("coordinates"))
+        if coords is not None:
+            coord_map[str(node["node_id"])] = coords
         else:
             missing_coords += 1
 
@@ -195,9 +216,10 @@ def build_network_figure(
 
     figure = go.Figure()
 
-    # 1. Pipes first :)
-    pipe_x: list[float | None] = []
-    pipe_y: list[float | None] = []
+    link_paths: dict[str, tuple[list, list]] = {}
+    bounds_points = list(coord_map.values())
+    omitted_links = 0
+    valve_markers: dict[bool, list] = {False: [], True: []}
     pump_x: list[float] = []
     pump_y: list[float] = []
     pump_text: list[str] = []
@@ -212,20 +234,32 @@ def build_network_figure(
         link_type = str(link.get("type", "Pipe"))
         start_c = coord_map.get(str(link.get("start_node")))
         end_c = coord_map.get(str(link.get("end_node")))
-        if start_c is None or end_c is None:
+        vertices = [_coordinate_pair(v) for v in (link.get("vertices") or [])]
+        if start_c is None or end_c is None or any(v is None for v in vertices):
+            omitted_links += 1
             continue
-
-        vertices = [
-            (float(v[0]), float(v[1]))
-            for v in (link.get("vertices") or [])
-            if isinstance(v, (list, tuple)) and len(v) >= 2
-        ]
         path = [start_c, *vertices, end_c]
+        bounds_points.extend(path)
+        is_attacked = view_mode in {"attack", "preview"} and link_id in targeted_ids
+        group = {"pump": "Pump connections", "valve": "Valve connections"}.get(
+            link_type.lower(), "Pipes"
+        )
+        if is_attacked:
+            group = "Targeted links" if view_mode == "preview" else "Attacked links"
+        xs, ys = link_paths.setdefault(group, ([], []))
+        xs.extend([p[0] for p in path] + [None])
+        ys.extend([p[1] for p in path] + [None])
 
+        if link_type.lower() == "valve":
+            valve_markers[is_attacked].append(
+                (
+                    link_id,
+                    _path_midpoint(path),
+                    f"Valve: {link_id}<br>From {link['start_node']} to {link['end_node']}",
+                )
+            )
         if link_type.lower() == "pump":
-            mid_x = (start_c[0] + end_c[0]) / 2.0
-            mid_y = (start_c[1] + end_c[1]) / 2.0
-            is_attacked = view_mode in {"attack", "preview"} and link_id in targeted_ids
+            mid_x, mid_y = _path_midpoint(path)
             if view_mode == "preview":
                 status_label = "Scenario target" if is_attacked else "Not targeted"
             else:
@@ -245,21 +279,18 @@ def build_network_figure(
                 pump_y.append(mid_y)
                 pump_text.append(hover)
                 pump_ids.append(link_id)
-        else:
-            for px, py in path:
-                pipe_x.append(px)
-                pipe_y.append(py)
-            pipe_x.append(None)
-            pipe_y.append(None)
-
-    if pipe_x:
+    for name, (xs, ys) in link_paths.items():
+        targeted = name in {"Targeted links", "Attacked links"}
         figure.add_trace(
             go.Scatter(
-                x=pipe_x,
-                y=pipe_y,
+                x=xs,
+                y=ys,
                 mode="lines",
-                name="Pipes",
-                line={"color": "#94a3b8", "width": 1.5},
+                name=name,
+                line={
+                    "color": "#f97316" if targeted else "#94a3b8",
+                    "width": 3 if targeted else 1.5,
+                },
                 hoverinfo="skip",
             )
         )
@@ -371,7 +402,7 @@ def build_network_figure(
                 y=pump_y,
                 mode="markers+text",
                 name="Other pumps" if view_mode == "preview" else "Pumps (normal)",
-                customdata=pump_ids,
+                customdata=[{"link_id": link_id} for link_id in pump_ids],
                 text=pump_ids,
                 textposition="bottom center",
                 textfont={"size": 9},
@@ -393,7 +424,7 @@ def build_network_figure(
                 y=attacked_pump_y,
                 mode="markers+text",
                 name="Targeted pump" if view_mode == "preview" else "Attacked pump",
-                customdata=attacked_pump_ids,
+                customdata=[{"link_id": link_id} for link_id in attacked_pump_ids],
                 text=attacked_pump_ids,
                 textposition="bottom center",
                 textfont={"size": 10, "color": "#b91c1c"},
@@ -404,6 +435,34 @@ def build_network_figure(
                     "symbol": "diamond",
                     "color": "#f97316",
                     "line": {"width": 2.5, "color": "#991b1b"},
+                },
+            )
+        )
+
+    for targeted, markers in valve_markers.items():
+        if not markers:
+            continue
+        label = (
+            ("Targeted valve" if view_mode == "preview" else "Attacked valve")
+            if targeted
+            else "Valves"
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=[item[1][0] for item in markers],
+                y=[item[1][1] for item in markers],
+                mode="markers+text",
+                name=label,
+                customdata=[{"link_id": item[0]} for item in markers],
+                text=[item[0] for item in markers],
+                textposition="bottom center",
+                textfont={"size": 9},
+                hovertext=[item[2] for item in markers],
+                hovertemplate="%{hovertext}<extra></extra>",
+                marker={
+                    "size": 15 if targeted else 12,
+                    "symbol": "bowtie",
+                    "color": "#f97316" if targeted else "#7c3aed",
                 },
             )
         )
@@ -432,27 +491,47 @@ def build_network_figure(
         if timing
         else "Simulation window: full run"
     )
-    missing_note = (
-        f" ({missing_coords} nodes without coordinates omitted)"
-        if missing_coords
-        else ""
-    )
+    omissions = []
+    if missing_coords:
+        omissions.append(f"{missing_coords} node(s)")
+    if omitted_links:
+        omissions.append(f"{omitted_links} link(s)")
+    if omissions:
+        figure.add_annotation(
+            text=f"Omitted {' and '.join(omissions)} with missing or invalid coordinates",
+            xref="paper",
+            yref="paper",
+            x=0,
+            y=0,
+            xanchor="left",
+            yanchor="bottom",
+            showarrow=False,
+            bgcolor="rgba(255,255,255,0.9)",
+            font={"size": 11},
+        )
+    min_x, max_x = min(p[0] for p in bounds_points), max(p[0] for p in bounds_points)
+    min_y, max_y = min(p[1] for p in bounds_points), max(p[1] for p in bounds_points)
+    padding = max(max_x - min_x, max_y - min_y, 1e-9) * 0.08
+    if max_x == min_x and max_y == min_y:
+        padding = max(abs(min_x), abs(min_y), 1) * 0.08
 
     figure.update_layout(
         title={
             "text": (
                 f"{view_mode.capitalize()} Network View — {window_note}<br>"
-                f"<sup>Coordinates: {coord_sys} units | Pressures: psi{missing_note}</sup>"
+                f"<sup>Coordinates: {coord_sys} units | Pressures: psi</sup>"
             ),
             "font": {"size": 14},
         },
         xaxis={
             "title": f"X ({coord_sys} units)",
+            "range": [min_x - padding, max_x + padding],
             "showgrid": False,
             "zeroline": False,
         },
         yaxis={
             "title": f"Y ({coord_sys} units)",
+            "range": [min_y - padding, max_y + padding],
             "showgrid": False,
             "zeroline": False,
             "scaleanchor": "x",
@@ -617,6 +696,8 @@ def _sync_node_from_plot_selection(event: Any, valid_nodes: list[str]) -> None:
     if not points:
         return
     custom = points[0].get("customdata")
+    if isinstance(custom, dict):
+        return
     if isinstance(custom, list) and custom:
         candidate = str(custom[0])
     elif custom is not None:
@@ -633,6 +714,103 @@ def _mark_run_pending() -> None:
 
 def _resume_run_wait() -> None:
     st.session_state["run_wait_deadline"] = time.monotonic() + AUTO_WAIT_SECONDS
+
+
+def _select_predefined_scenario(scenarios: list[dict[str, Any]]) -> dict[str, Any]:
+    scenario_by_label = {_format_scenario_option(s): s for s in scenarios}
+    selected_label = st.selectbox(
+        "Select Scenario",
+        options=list(scenario_by_label),
+        key="scenario_selector",
+        disabled=st.session_state.get("run_in_progress", False),
+    )
+    return scenario_by_label[selected_label]
+
+
+def _custom_scenario_controls(
+    api_url: str, disabled: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        with httpx.Client(base_url=api_url, timeout=10.0) as client:
+            models = api_get(client, "/models")
+            attacks = api_get(client, "/attack-types")
+            if not models or not attacks:
+                st.info("No models or attack types are available for custom scenarios.")
+                st.stop()
+            model_id = st.selectbox(
+                "Water network model",
+                options=[m["model_id"] for m in models],
+                format_func=lambda value: next(
+                    m["name"] for m in models if m["model_id"] == value
+                ),
+                key="custom_model",
+                disabled=disabled,
+            )
+            attack_type = st.selectbox(
+                "Attack type",
+                options=[a["attack_type"] for a in attacks],
+                format_func=lambda value: next(
+                    a["name"] for a in attacks if a["attack_type"] == value
+                ),
+                key="custom_attack",
+                disabled=disabled,
+            )
+            topology = api_get(client, f"/models/{model_id}/topology")
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        st.error(f"Could not load custom scenario options: {exc}")
+        st.stop()
+    pumps = [
+        link["link_id"] for link in topology.get("links", []) if link["type"] == "Pump"
+    ]
+    if not pumps:
+        st.warning(
+            "This model has no pumps. Preview is available; select another model to run pump shutdown."
+        )
+    target = st.selectbox(
+        "Target pump",
+        options=pumps,
+        key=f"custom_target_{model_id}_{attack_type}",
+        disabled=disabled or not pumps,
+    )
+    name = st.text_input(
+        "Scenario name", value="Custom pump shutdown", max_chars=200, disabled=disabled
+    )
+    start = st.number_input(
+        "Attack start (hours)",
+        min_value=0.0,
+        max_value=167.0,
+        value=1.0,
+        step=0.5,
+        disabled=disabled,
+    )
+    duration = st.number_input(
+        "Attack duration (hours)",
+        min_value=0.01,
+        max_value=168.0,
+        value=2.0,
+        step=0.5,
+        disabled=disabled,
+    )
+    st.caption(
+        "Custom scenarios are run without being saved to the scenario library. Attack must end within seven days."
+    )
+    if not name.strip() or start + duration > 168:
+        st.warning(
+            "Enter a scenario name and an attack window ending within seven days."
+        )
+        st.stop()
+    definition = {
+        "name": name,
+        "model_id": model_id,
+        "attack_type": attack_type,
+        "target_components": [target] if target is not None else [],
+        "timing": {"start_time_sec": start * 3600, "duration_sec": duration * 3600},
+        "parameters": {},
+    }
+    identity = hashlib.sha256(
+        json.dumps(definition, sort_keys=True).encode()
+    ).hexdigest()
+    return {"scenario_id": f"draft_{identity}", **definition}, topology
 
 
 def main() -> None:
@@ -670,25 +848,27 @@ def main() -> None:
         )
         st.stop()
 
-    if not isinstance(scenarios, list) or not scenarios:
-        st.warning(
-            "No scenarios are available in the API. Create or preload a scenario first."
-        )
-        st.stop()
-
     with controls_panel:
-        scenario_by_label = {_format_scenario_option(s): s for s in scenarios}
-        selected_label = st.selectbox(
-            "Select Scenario",
-            options=list(scenario_by_label.keys()),
-            key="scenario_selector",
+        source = st.radio(
+            "Scenario source",
+            ["Predefined scenario", "Custom scenario"],
             disabled=st.session_state.get("run_in_progress", False),
         )
-        selected_scenario = scenario_by_label[selected_label]
+        if source == "Custom scenario":
+            selected_scenario, topology = _custom_scenario_controls(
+                api_url, st.session_state.get("run_in_progress", False)
+            )
+        else:
+            if not scenarios:
+                st.info(
+                    "No predefined scenarios are available. Choose Custom scenario to configure a run."
+                )
+                st.stop()
+            selected_scenario = _select_predefined_scenario(scenarios)
+            topology = None
         scenario_id = selected_scenario["scenario_id"]
         model_id = selected_scenario["model_id"]
 
-        # Reset active run state if the operator switches scenarios
         if st.session_state.get("active_scenario_id") != scenario_id:
             st.session_state["active_scenario_id"] = scenario_id
             st.session_state.pop("active_run_id", None)
@@ -699,13 +879,13 @@ def main() -> None:
         with metadata_panel.container():
             _render_scenario_summary(selected_scenario, None)
             _render_run_details(selected_scenario, None, None)
-        try:
-            with httpx.Client(base_url=api_url, timeout=10.0) as client:
-                topology = api_get(client, f"/models/{model_id}/topology")
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-            st.error(f"Could not load the scenario network: {exc}")
-            st.stop()
-        run_clicked = False
+        if topology is None:
+            try:
+                with httpx.Client(base_url=api_url, timeout=10.0) as client:
+                    topology = api_get(client, f"/models/{model_id}/topology")
+            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                st.error(f"Could not load the scenario network: {exc}")
+                st.stop()
         with preview_panel:
             st.subheader("Network preview")
             preview = build_network_figure(
@@ -731,7 +911,8 @@ def main() -> None:
             run_clicked = st.button(
                 "Run Scenario",
                 type="primary",
-                disabled=st.session_state.get("run_in_progress", False),
+                disabled=st.session_state.get("run_in_progress", False)
+                or not selected_scenario["target_components"],
                 on_click=_mark_run_pending,
             )
         with poll_col:
@@ -741,7 +922,20 @@ def main() -> None:
         try:
             with httpx.Client(base_url=api_url, timeout=10.0) as client:
                 if run_clicked:
-                    submitted = api_post(client, "/runs", {"scenario_id": scenario_id})
+                    payload = {"scenario_id": scenario_id}
+                    if source == "Custom scenario":
+                        payload = {
+                            "scenario": {
+                                key: value
+                                for key, value in selected_scenario.items()
+                                if key != "scenario_id"
+                            }
+                        }
+                    try:
+                        submitted = api_post(client, "/runs", payload)
+                    except (httpx.HTTPError, RuntimeError, ValueError):
+                        st.session_state["run_in_progress"] = False
+                        raise
                     st.session_state["active_run_id"] = submitted["run_id"]
                     st.session_state["run_wait_deadline"] = (
                         time.monotonic() + AUTO_WAIT_SECONDS
@@ -829,9 +1023,13 @@ def main() -> None:
             st.stop()
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             wait_status.empty()
+            if not st.session_state.get("active_run_id"):
+                st.session_state["run_in_progress"] = False
             st.error(f"API error while loading run or network data: {exc}")
             st.stop()
 
+        if results is not None:
+            selected_scenario = results.get("scenario_snapshot") or selected_scenario
         if run_status is not None:
             _render_run_status_banner(run_status)
         else:

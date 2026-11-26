@@ -332,7 +332,7 @@ def test_migrations_are_not_applied_twice(tmp_path):
         "SELECT COUNT(*) AS count FROM schema_migrations"
     ).fetchone()
 
-    assert result["count"] == 2
+    assert result["count"] == 3
 
     db.close()
 
@@ -356,9 +356,22 @@ def test_upgrade_populated_version_one_database(tmp_path):
         "INSERT INTO runs (run_id, scenario_id, model_id, scenario_snapshot, status) VALUES ('old_run', ?, 'ctown', ?, 'pending')",
         (scenario["scenario_id"], json.dumps(scenario)),
     )
+    connection.execute(
+        "INSERT INTO run_status_history (run_id, new_status) VALUES ('old_run', 'pending')"
+    )
+    connection.execute(
+        "INSERT INTO result_summaries (run_id, summary_json) VALUES ('old_run', ?)",
+        ('{"retained": true}',),
+    )
+    connection.execute(
+        "INSERT INTO result_details (run_id, case_name, component_type, component_id, metric_name, time_seconds, value) VALUES ('old_run', 'baseline', 'node', 'J1', 'pressure', 0, 25)"
+    )
     connection.commit()
     connection.close()
     db = SQLiteStorage(db_path)
+    assert len(db.get_run("old_run")["status_history"]) == 1
+    assert db.get_run_summary("old_run") == {"retained": True}
+    assert db.get_run_details("old_run")[0]["value"] == 25
     assert db.get_scenario(scenario["scenario_id"]) == scenario
     assert db.get_run("old_run")["scenario_snapshot"] == scenario
     assert db.get_run("old_run")["metadata"] == {}
@@ -370,7 +383,7 @@ def test_upgrade_populated_version_one_database(tmp_path):
         for row in db.connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
-    ] == [1, 2]
+    ] == [1, 2, 3]
     db.close()
 
 
@@ -382,7 +395,7 @@ def test_failed_upgrade_rolls_back_and_can_be_retried(tmp_path, monkeypatch):
     db = SQLiteStorage(db_path)
     db.register_model({"model_id": "original", "name": "Original"})
     db.close()
-    migration = tmp_path / "003_retry.sql"
+    migration = tmp_path / "004_retry.sql"
     migration.write_text(
         "CREATE TABLE upgrade_probe (id INTEGER); INSERT INTO missing_table VALUES (1);"
     )
@@ -406,12 +419,12 @@ def test_failed_upgrade_rolls_back_and_can_be_retried(tmp_path, monkeypatch):
     )
     connection.close()
     migration.write_text(
-        "CREATE TABLE upgrade_probe (id INTEGER); INSERT INTO schema_migrations (version) VALUES (3);"
+        "CREATE TABLE upgrade_probe (id INTEGER); INSERT INTO schema_migrations (version) VALUES (4);"
     )
     db = SQLiteStorage(db_path)
     assert db.get_model("original")["name"] == "Original"
     assert db.connection.execute(
-        "SELECT version FROM schema_migrations WHERE version = 3"
+        "SELECT version FROM schema_migrations WHERE version = 4"
     ).fetchone()
     db.close()
 
