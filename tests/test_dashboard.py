@@ -196,18 +196,34 @@ def test_dashboard_handles_unavailable_api_and_recovers(monkeypatch):
 
 
 def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
+    from streamlit.delta_generator import DeltaGenerator
+
     polls = {"count": 0}
+    submissions = []
+    progress_labels = []
+    original_spinner = DeltaGenerator.spinner
+
+    def record_progress(self, text, **kwargs):
+        progress_labels.append(text)
+        return original_spinner(self, text, **kwargs)
+
+    monkeypatch.setattr(DeltaGenerator, "spinner", record_progress)
+
+    def submit_handler(payload):
+        submissions.append(payload)
+        run_id = "run-123" if len(submissions) == 1 else "run-456"
+        return 202, {"run_id": run_id, "status": "queued"}
 
     def status_handler():
         polls["count"] += 1
-        if polls["count"] == 1:
+        if polls["count"] <= 2:
             return (
                 200,
                 {
                     "run_id": "run-123",
                     "scenario_id": "scenario_pump_01",
                     "model_id": "ctown",
-                    "status": "running",
+                    "status": "queued" if polls["count"] == 1 else "running",
                 },
             )
         return (
@@ -230,25 +246,22 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
                 "/models/ctown/topology": (200, _sample_topology()),
                 "/runs/run-123": status_handler,
                 "/runs/run-123/results": (200, _sample_results("run-123")),
+                "/runs/run-456": (
+                    200,
+                    {"run_id": "run-456", "status": "succeeded"},
+                ),
+                "/runs/run-456/results": (200, _sample_results("run-456")),
             },
-            routes_post={
-                "/runs": (
-                    202,
-                    {
-                        "run_id": "run-123",
-                        "scenario_id": "scenario_pump_01",
-                        "model_id": "ctown",
-                        "status": "queued",
-                    },
-                )
-            },
+            routes_post={"/runs": submit_handler},
         ),
     )
 
     page = AppTest.from_file(str(DASHBOARD)).run()
     assert not page.exception
 
-    assert any(h.value == "Scenario Network Preview" for h in page.tabs[0].subheader)
+    assert any(h.value == "Network preview" for h in page.subheader)
+    assert [tab.label for tab in page.tabs] == ["Scenario & Run", "Results"]
+    assert not page.radio
     assert not any(b.label == "View Results" for b in page.button)
 
     # Submit the selected scenario.
@@ -257,23 +270,33 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
 
     assert not page.exception
     assert any("succeeded" in s.value for s in page.success)
+    assert page.session_state["dashboard_tab"] == "Results"
+    assert "Queued — waiting to start" in progress_labels
+    assert "Running baseline and attack simulations" in progress_labels
+    assert "Loading results" in progress_labels
+    headings = [h.value for h in page.tabs[1].subheader]
+    assert headings.index("Node pressure") < headings.index("Network comparison")
+    assert not any(e.label == "Scenario details" for e in page.tabs[1].expander)
+    for tab in page.tabs:
+        for expander in tab.expander:
+            assert len(expander.expander) == 1
+    assert not page.status
+    assert "Scenario" in headings
+    assert not any(b.label == "View Results" for b in page.button)
 
-    assert [tab.label for tab in page.tabs] == ["Scenario & Run", "Results"]
-    assert any(b.label == "Run Scenario" for b in page.tabs[0].button)
+    assert page.session_state["dashboard_tab"] == "Results"
     assert not page.tabs[1].button
-    assert page.tabs[1].dataframe
-    assert any(
-        "Simulation completed. Affected nodes: 1." in item.value
-        for item in page.tabs[0].info
-    )
-    assert not page.radio
+    assert page.dataframe
     assert not any("Connected API" in caption.value for caption in page.caption)
 
-    metric_map = {m.label: m.value for m in page.metric}
-    assert metric_map["Scenario ID"] == "scenario_pump_01"
-    assert metric_map["Attack Type"] == "pump_off"
-    assert metric_map["Targeted Components"] == "PU1"
-    assert metric_map["Simulation Timestamp"] == "2026-04-01 12:00:03"
+    for tab in page.tabs:
+        text = "\n".join(item.value for item in tab.markdown)
+        assert "scenario_pump_01" in text
+        assert "Pump off" in text
+        assert "PU1" in text
+        assert "2026-04-01 12:00:03" in text
+        assert any(expander.label == "Run details" for expander in tab.expander)
+    assert not any(m.label == "Scenario ID" for m in page.metric)
 
     assert page.selectbox[1].value == "J2"
     df = page.dataframe[0].value
@@ -285,11 +308,21 @@ def test_dashboard_submits_polls_and_displays_results_and_metadata(monkeypatch):
     assert any("unaffected" in i.value.lower() for i in page.info)
     assert page.dataframe[0].value["Attack (psi)"].tolist() == [50.0, 49.0, 49.0, 50.0]
 
-    next(b for b in page.button if b.label == "View Results").click().run()
-    assert not page.exception
     assert page.session_state["dashboard_tab"] == "Results"
     assert page.session_state["active_run_id"] == "run-123"
     assert page.session_state["selected_node"] == "J1"
+    assert len(submissions) == 1
+
+    page.session_state["dashboard_tab"] = "Scenario & Run"
+    page.run()
+    assert page.session_state["dashboard_tab"] == "Scenario & Run"
+    run_button = next(b for b in page.button if b.label == "Run Scenario")
+    assert not run_button.disabled
+    run_button.click().run()
+    assert not page.exception
+    assert page.session_state["dashboard_tab"] == "Results"
+    assert page.session_state["active_run_id"] == "run-456"
+    assert len(submissions) == 2
 
 
 def test_dashboard_displays_failed_run_error_and_incomplete_state(monkeypatch):
@@ -335,6 +368,10 @@ def test_dashboard_displays_failed_run_error_and_incomplete_state(monkeypatch):
     assert not page.exception
     assert not page.success
     assert any("CONVERGENCE_ERROR" in e.value for e in page.error)
+    assert page.session_state["dashboard_tab"] == "Scenario & Run"
+    assert not next(b for b in page.button if b.label == "Run Scenario").disabled
+    page.session_state["dashboard_tab"] = "Results"
+    page.run()
     assert any("failed" in w.value.lower() for w in page.warning)
 
 
@@ -376,6 +413,11 @@ def test_network_and_pressure_figures_match_analysis_and_handle_missing_coords()
     assert list(p_fig.data[0].y) == results["pressures"]["baseline"]["J2"]
     assert list(p_fig.data[1].y) == results["pressures"]["attack"]["J2"]
     assert list(p_fig.data[0].x) == [0.0, 1.0, 2.0, 3.0]
+    for trace, label in zip(p_fig.data, ["Baseline", "Attack"]):
+        assert trace.hovertemplate == (
+            f'<b style="color: {trace.line.color}">{label}</b><br>Time: %{{x}} hr'
+            "<br>Pressure: %{y:.2f} psi<extra></extra>"
+        )
 
     no_coord_topology = {
         "model_id": "empty",
@@ -492,10 +534,18 @@ def test_dashboard_stops_waiting_and_keeps_run_id(monkeypatch):
             {
                 "/scenarios": (200, [_sample_scenario()]),
                 "/models/ctown/topology": (200, _sample_topology()),
+                "/runs/run-slow": (
+                    200,
+                    {"run_id": "run-slow", "status": "succeeded"},
+                ),
+                "/runs/run-slow/results": (200, _sample_results("run-slow")),
             }
         ),
     )
     page = AppTest.from_file(str(DASHBOARD)).run()
+    assert not any(
+        b.label in {"Refresh Run Status", "Check Run Status"} for b in page.button
+    )
     page.session_state["active_run_id"] = "run-slow"
     page.session_state["run_wait_deadline"] = 0.0
     page.run()
@@ -504,3 +554,12 @@ def test_dashboard_stops_waiting_and_keeps_run_id(monkeypatch):
         "Stopped waiting after one minute" in warning.value for warning in page.warning
     )
     assert page.session_state["active_run_id"] == "run-slow"
+    assert any(b.label == "Check Run Status" for b in page.button)
+    page.run()
+    assert next(b for b in page.button if b.label == "Run Scenario").disabled
+    next(b for b in page.button if b.label == "Check Run Status").click().run()
+    assert not page.exception
+    assert page.session_state["active_run_id"] == "run-slow"
+    assert page.session_state["dashboard_tab"] == "Results"
+    assert page.dataframe
+    assert not any(b.label == "Check Run Status" for b in page.button)

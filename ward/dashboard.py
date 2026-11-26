@@ -1,6 +1,7 @@
 import math
 import os
 import time
+from contextlib import ExitStack
 from typing import Any
 
 import httpx
@@ -118,7 +119,7 @@ def _extract_api_error(response: httpx.Response) -> str:
 
 
 def _format_scenario_option(scenario: dict[str, Any]) -> str:
-    return f"{scenario['scenario_id']} — {scenario.get('name', 'Unnamed scenario')}"
+    return f"{scenario.get('name', 'Unnamed scenario')} — {scenario['scenario_id']}"
 
 
 def _extract_affected_map(analysis: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -488,6 +489,10 @@ def build_pressure_figure(
             x=time_hours,
             y=baseline_series,
             name=f"Baseline ({pressure_unit})",
+            hovertemplate=(
+                '<b style="color: #2563eb">Baseline</b><br>Time: %{x} hr'
+                f"<br>Pressure: %{{y:.2f}} {pressure_unit}<extra></extra>"
+            ),
             mode="lines+markers",
             line={"color": "#2563eb", "width": 2},
             connectgaps=False,
@@ -498,6 +503,10 @@ def build_pressure_figure(
             x=time_hours,
             y=attack_series,
             name=f"Attack ({pressure_unit})",
+            hovertemplate=(
+                '<b style="color: #dc2626">Attack</b><br>Time: %{x} hr'
+                f"<br>Pressure: %{{y:.2f}} {pressure_unit}<extra></extra>"
+            ),
             mode="lines+markers",
             line={"color": "#dc2626", "width": 2, "dash": "dash"},
             connectgaps=False,
@@ -544,7 +553,7 @@ def _render_run_status_banner(run_status: dict[str, Any]) -> None:
             f"Run `{run_id}` status: **running** — executing baseline and attack simulations."
         )
     elif status == "succeeded":
-        st.success(f"Run `{run_id}` status: **succeeded**.")
+        st.success("Simulation succeeded. Results are ready.")
     elif status == "failed":
         err = run_status.get("error") or {}
         code = err.get("code", "RUN_FAILED")
@@ -554,34 +563,50 @@ def _render_run_status_banner(run_status: dict[str, Any]) -> None:
         st.warning(f"Run `{run_id}` status: **{status}**.")
 
 
-def _render_metadata_panel(
+def _render_scenario_summary(
+    scenario: dict[str, Any],
+    results: dict[str, Any] | None,
+    *,
+    columns: int = 2,
+) -> None:
+    timing = (results or {}).get("timing") or scenario.get("timing") or {}
+    start_hr, end_hr = _window_hours(timing)
+    targets = ", ".join(scenario.get("target_components") or []) or "None"
+    attack_type = scenario.get("attack_type", "—").replace("_", " ").capitalize()
+
+    st.markdown(f"**{scenario.get('name', 'Scenario')}**")
+    st.write(scenario.get("description") or "No description provided.")
+    fields = [
+        ("Model", scenario.get("model_id", "—")),
+        ("Attack type", attack_type),
+        ("Targets", targets),
+        ("Attack window", f"{start_hr:.2f}–{end_hr:.2f} hours"),
+    ]
+    field_columns = st.columns(columns)
+    for index, (label, value) in enumerate(fields):
+        field_columns[index % columns].markdown(f"**{label}:** {value}")
+
+
+def _render_run_details(
     scenario: dict[str, Any],
     run_status: dict[str, Any] | None,
     results: dict[str, Any] | None,
 ) -> None:
-    st.subheader("Scenario & Simulation Metadata")
-    targets = ", ".join(scenario.get("target_components") or []) or "None"
-    timing = (results or {}).get("timing") or scenario.get("timing") or {}
-    start_hr, end_hr = _window_hours(timing)
-    timestamp = (
-        (results or {}).get("completed_at")
-        or (run_status or {}).get("completed_at")
-        or (results or {}).get("created_at")
-        or (run_status or {}).get("created_at")
-        or "Not yet completed"
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Scenario ID", scenario.get("scenario_id", "—"))
-    c2.metric("Attack Type", scenario.get("attack_type", "—"))
-    c3.metric("Targeted Components", targets)
-    c4.metric("Simulation Timestamp", str(timestamp))
-
-    st.caption(
-        f"**Name:** {scenario.get('name', '—')} | "
-        f"**Description:** {scenario.get('description') or 'No description provided.'} | "
-        f"**Attack Window:** {start_hr:.2f} h to {end_hr:.2f} h"
-    )
+    run = run_status or {}
+    saved_results = results or {}
+    with st.expander("Run details"):
+        st.markdown(f"**Scenario ID:** {scenario.get('scenario_id', '—')}")
+        st.markdown(f"**Run ID:** {run.get('run_id', 'No run yet')}")
+        st.markdown(f"**Status:** {run.get('status', 'Not started').capitalize()}")
+        st.markdown(
+            f"**Submitted:** {saved_results.get('created_at') or run.get('created_at') or '—'}"
+        )
+        st.markdown(
+            f"**Started:** {saved_results.get('started_at') or run.get('started_at') or '—'}"
+        )
+        st.markdown(
+            f"**Completed:** {saved_results.get('completed_at') or run.get('completed_at') or 'Not yet completed'}"
+        )
 
 
 def _sync_node_from_plot_selection(event: Any, valid_nodes: list[str]) -> None:
@@ -602,24 +627,38 @@ def _sync_node_from_plot_selection(event: Any, valid_nodes: list[str]) -> None:
         st.session_state["selected_node"] = candidate
 
 
-def _show_results() -> None:
-    st.session_state["dashboard_tab"] = "Results"
+def _mark_run_pending() -> None:
+    st.session_state["run_in_progress"] = True
+
+
+def _resume_run_wait() -> None:
+    st.session_state["run_wait_deadline"] = time.monotonic() + AUTO_WAIT_SECONDS
 
 
 def main() -> None:
     st.set_page_config(page_title="WARD Attack Impact Dashboard", layout="wide")
-    st.title("WARD — Water Network Cyber-Attack Dashboard")
+    st.title("WARD")
+    st.caption("Water Network Cyber-Attack Dashboard")
 
     api_url = get_api_base_url()
 
+    next_page = st.session_state.pop("next_dashboard_tab", None)
+    if next_page is not None:
+        st.session_state["dashboard_tab"] = next_page
     scenario_tab, results_tab = st.tabs(
         ["Scenario & Run", "Results"],
-        default=st.session_state.get("dashboard_tab", "Scenario & Run"),
+        key="dashboard_tab",
+        on_change="rerun",
     )
 
     with scenario_tab:
-        if st.button("Reload Scenarios"):
-            st.rerun()
+        controls_col, preview_col = st.columns([1, 2], gap="large")
+        controls_panel = controls_col.container(border=True)
+        preview_panel = preview_col.container(border=True)
+        with controls_panel:
+            st.subheader("Scenario & Run")
+            if st.button("Reload Scenarios"):
+                st.rerun()
 
     try:
         with httpx.Client(base_url=api_url, timeout=10.0) as client:
@@ -637,12 +676,13 @@ def main() -> None:
         )
         st.stop()
 
-    with scenario_tab:
+    with controls_panel:
         scenario_by_label = {_format_scenario_option(s): s for s in scenarios}
         selected_label = st.selectbox(
             "Select Scenario",
             options=list(scenario_by_label.keys()),
             key="scenario_selector",
+            disabled=st.session_state.get("run_in_progress", False),
         )
         selected_scenario = scenario_by_label[selected_label]
         scenario_id = selected_scenario["scenario_id"]
@@ -653,33 +693,50 @@ def main() -> None:
             st.session_state["active_scenario_id"] = scenario_id
             st.session_state.pop("active_run_id", None)
             st.session_state.pop("selected_node", None)
+            st.session_state["run_in_progress"] = False
 
-        metadata_panel = st.container()
-        st.subheader("Scenario Network Preview")
+        metadata_panel = st.empty()
+        with metadata_panel.container():
+            _render_scenario_summary(selected_scenario, None)
+            _render_run_details(selected_scenario, None, None)
         try:
             with httpx.Client(base_url=api_url, timeout=10.0) as client:
                 topology = api_get(client, f"/models/{model_id}/topology")
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             st.error(f"Could not load the scenario network: {exc}")
             st.stop()
-        preview = build_network_figure(
-            topology, view_mode="preview", scenario=selected_scenario
-        )
-        st.caption(
-            "The highlighted pump is the scenario target. This preview does not show simulation results."
-        )
-        if preview is None:
-            st.warning(
-                "Network coordinates are missing for this model, so the scenario preview cannot be drawn."
+        run_clicked = False
+        with preview_panel:
+            st.subheader("Network preview")
+            preview = build_network_figure(
+                topology, view_mode="preview", scenario=selected_scenario
             )
-        else:
-            st.plotly_chart(preview, key="scenario_network_preview")
+            st.caption(
+                "The highlighted pump is the scenario target. This preview does not show simulation results."
+            )
+            if preview is None:
+                st.warning(
+                    "Network coordinates are missing for this model, so the scenario preview cannot be drawn."
+                )
+            else:
+                preview.update_layout(
+                    title={"text": ""}, height=520, margin={"t": 10, "b": 80}
+                )
+                st.plotly_chart(
+                    preview, key="scenario_network_preview", width="stretch"
+                )
 
         action_col, poll_col = st.columns([1, 1])
         with action_col:
-            run_clicked = st.button("Run Scenario", type="primary")
+            run_clicked = st.button(
+                "Run Scenario",
+                type="primary",
+                disabled=st.session_state.get("run_in_progress", False),
+                on_click=_mark_run_pending,
+            )
         with poll_col:
-            refresh_clicked = st.button("Refresh Run Status")
+            status_check = st.empty()
+        wait_status = st.empty()
 
         try:
             with httpx.Client(base_url=api_url, timeout=10.0) as client:
@@ -695,12 +752,16 @@ def main() -> None:
                 active_run_id = st.session_state.get("active_run_id")
 
                 if active_run_id:
-                    if refresh_clicked or "run_wait_deadline" not in st.session_state:
+                    if "run_wait_deadline" not in st.session_state:
                         st.session_state["run_wait_deadline"] = (
                             time.monotonic() + AUTO_WAIT_SECONDS
                         )
                     deadline = st.session_state["run_wait_deadline"]
-                    with st.spinner("Simulation in progress - waiting for run data..."):
+                    with ExitStack() as progress:
+                        progress.enter_context(
+                            wait_status.spinner("Checking run status")
+                        )
+                        current_status = None
                         run_status = api_get_run_data(
                             client, f"/runs/{active_run_id}", deadline=deadline
                         )
@@ -709,6 +770,16 @@ def main() -> None:
                             run_status.get("status") in {"queued", "running"}
                             and polls < MAX_AUTO_POLLS
                         ):
+                            if run_status["status"] != current_status:
+                                current_status = run_status["status"]
+                                progress.close()
+                                progress.enter_context(
+                                    wait_status.spinner(
+                                        "Queued — waiting to start"
+                                        if current_status == "queued"
+                                        else "Running baseline and attack simulations"
+                                    )
+                                )
                             time.sleep(
                                 min(
                                     POLL_INTERVAL_SEC,
@@ -721,28 +792,45 @@ def main() -> None:
                             polls += 1
 
                         if run_status.get("status") == "succeeded":
+                            progress.close()
+                            progress.enter_context(
+                                wait_status.spinner("Loading results")
+                            )
                             results = api_get_run_data(
                                 client,
                                 f"/runs/{active_run_id}/results",
                                 deadline=deadline,
                             )
+                    wait_status.empty()
                     if run_status.get("status") in {"queued", "running"}:
                         st.rerun()
                     st.session_state.pop("run_wait_deadline", None)
+                    was_running = st.session_state.pop("run_in_progress", False)
+                    if (
+                        results is not None
+                        and st.session_state.get("results_shown_run_id")
+                        != active_run_id
+                    ):
+                        st.session_state["results_shown_run_id"] = active_run_id
+                        st.session_state["next_dashboard_tab"] = "Results"
+                        st.rerun()
+                    if was_running:
+                        st.rerun()
 
         except RunWaitExpired:
+            wait_status.empty()
+            st.session_state["run_in_progress"] = True
             st.warning(
                 "Stopped waiting after one minute. The simulation has not been cancelled. "
-                "Click Refresh Run Status to check the same run again."
+                "Click Check Run Status to check the same run again."
             )
+            status_check.button("Check Run Status", on_click=_resume_run_wait)
             st.caption(f"Run ID: {st.session_state.get('active_run_id')}")
             st.stop()
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            wait_status.empty()
             st.error(f"API error while loading run or network data: {exc}")
             st.stop()
-
-        if refresh_clicked and not st.session_state.get("active_run_id"):
-            st.info("No active run yet. Click **Run Scenario** to start a simulation.")
 
         if run_status is not None:
             _render_run_status_banner(run_status)
@@ -751,26 +839,12 @@ def main() -> None:
                 "Select a scenario above and click **Run Scenario** to execute paired baseline and attack simulations."
             )
 
-        with metadata_panel:
-            _render_metadata_panel(selected_scenario, run_status, results)
-        if results is not None:
-            analysis = results.get("analysis") or {}
-            count = (analysis.get("summary") or {}).get("affected_node_count")
-            if count is None and "affected_nodes" in analysis:
-                count = len(analysis["affected_nodes"])
-            if count is None:
-                st.info(
-                    "Simulation completed. Detailed results are available in Results."
-                )
-            else:
-                st.info(
-                    f"Simulation completed. Affected nodes: {count}. Explore the Results tab for details."
-                )
-            st.button("View Results", on_click=_show_results)
-        st.divider()
+        with metadata_panel.container():
+            _render_scenario_summary(selected_scenario, results)
+            _render_run_details(selected_scenario, run_status, results)
 
     with results_tab:
-        st.caption(f"Results for: {selected_scenario['name']} ({scenario_id})")
+        st.markdown(f"**{selected_scenario['name']}**")
         if results is None:
             st.info(
                 "No completed results yet. Use Scenario & Run to start a simulation or check its status."
@@ -782,17 +856,17 @@ def main() -> None:
 
         if results is not None:
             summary = (results.get("analysis") or {}).get("summary") or {}
-            st.subheader("Impact Analysis Summary")
-            m1, m2, m3 = st.columns(3)
+            st.subheader("Impact summary")
+            m1, m2, m3 = [col.container(border=True) for col in st.columns(3)]
             m1.metric(
-                "Evaluated Nodes",
+                "Evaluated nodes",
                 summary.get("total_evaluated_nodes", len(topology_nodes)),
             )
             m2.metric(
-                "Affected Nodes", summary.get("affected_node_count", len(affected_ids))
+                "Affected nodes", summary.get("affected_node_count", len(affected_ids))
             )
             m3.metric(
-                "Pre-existing Low Pressure Only",
+                "Pre-existing low pressure only",
                 summary.get("pre_existing_only_node_count", 0),
             )
             if not affected_ids:
@@ -801,147 +875,162 @@ def main() -> None:
                     "You can still inspect any node's baseline vs. attack pressure curve below."
                 )
 
-        filter_affected_only = False
-        if affected_ids:
-            filter_affected_only = st.checkbox(
-                f"Filter node selector to affected nodes ({len(affected_ids)})",
-                value=False,
+        with st.container(border=True):
+            st.subheader("Node pressure")
+            selector_col, filter_col = st.columns([3, 1], vertical_alignment="bottom")
+            filter_affected_only = False
+            if affected_ids:
+                filter_affected_only = filter_col.checkbox(
+                    f"Affected nodes only ({len(affected_ids)})",
+                    value=False,
+                )
+
+            selectable_nodes = (
+                affected_ids
+                if (filter_affected_only and affected_ids)
+                else topology_nodes
+            )
+            if not selectable_nodes:
+                st.warning("No network nodes are available in the model topology.")
+                st.stop()
+
+            default_node = (
+                affected_ids[0]
+                if affected_ids and affected_ids[0] in selectable_nodes
+                else selectable_nodes[0]
+            )
+            if (
+                results is not None
+                and affected_ids
+                and st.session_state.get("focused_run_id") != active_run_id
+            ):
+                st.session_state["focused_run_id"] = active_run_id
+                st.session_state["selected_node"] = affected_ids[0]
+            elif st.session_state.get("selected_node") not in selectable_nodes:
+                st.session_state["selected_node"] = default_node
+
+            selected_node = selector_col.selectbox(
+                "Inspect node (synchronized with network maps)",
+                options=selectable_nodes,
+                key="selected_node",
             )
 
-        selectable_nodes = (
-            affected_ids if (filter_affected_only and affected_ids) else topology_nodes
-        )
-        if not selectable_nodes:
-            st.warning("No network nodes are available in the model topology.")
-            st.stop()
-
-        default_node = (
-            affected_ids[0]
-            if affected_ids and affected_ids[0] in selectable_nodes
-            else selectable_nodes[0]
-        )
-        if (
-            results is not None
-            and affected_ids
-            and st.session_state.get("focused_run_id") != active_run_id
-        ):
-            st.session_state["focused_run_id"] = active_run_id
-            st.session_state["selected_node"] = affected_ids[0]
-        elif st.session_state.get("selected_node") not in selectable_nodes:
-            st.session_state["selected_node"] = default_node
-
-        selected_node = st.selectbox(
-            "Inspect Node (synchronized with network maps)",
-            options=selectable_nodes,
-            key="selected_node",
-        )
-
-        st.subheader("Baseline vs. Attack Network Views")
-
-        base_col, atk_col = st.columns(2)
-        with base_col:
-            base_fig = build_network_figure(
-                topology,
-                view_mode="baseline",
-                scenario=selected_scenario,
-                results=results,
-                selected_node=selected_node,
-            )
-            if base_fig is None:
+            if run_status is None:
+                st.info(
+                    "Run the scenario to generate baseline and attack pressure time series."
+                )
+            elif run_status.get("status") in {"queued", "running"}:
+                st.info(
+                    "Simulation results are not ready yet while the run is still in progress."
+                )
+            elif run_status.get("status") == "failed":
                 st.warning(
-                    "Network coordinates are missing for this model, so the baseline map cannot be drawn."
+                    "No pressure results are available because this simulation run failed."
                 )
+            elif results is None:
+                st.warning("Results payload is missing for this completed run.")
             else:
-                base_event = st.plotly_chart(
-                    base_fig,
-                    use_container_width=True,
-                    on_select="rerun",
-                    key="baseline_network_plot",
-                )
-                _sync_node_from_plot_selection(base_event, selectable_nodes)
+                pressures = results.get("pressures") or {}
+                base_vals = (pressures.get("baseline") or {}).get(selected_node)
+                atk_vals = (pressures.get("attack") or {}).get(selected_node)
 
-        with atk_col:
-            atk_fig = build_network_figure(
-                topology,
-                view_mode="attack",
-                scenario=selected_scenario,
-                results=results,
-                selected_node=selected_node,
-            )
-            if atk_fig is None:
-                st.warning(
-                    "Network coordinates are missing for this model, so the attack map cannot be drawn."
-                )
-            else:
-                atk_event = st.plotly_chart(
-                    atk_fig,
-                    use_container_width=True,
-                    on_select="rerun",
-                    key="attack_network_plot",
-                )
-                _sync_node_from_plot_selection(atk_event, selectable_nodes)
-
-        st.divider()
-        st.subheader(f"Pressure Over Time — Node {selected_node}")
-
-        if run_status is None:
-            st.info(
-                "Run the scenario to generate baseline and attack pressure time series."
-            )
-        elif run_status.get("status") in {"queued", "running"}:
-            st.info(
-                "Simulation results are not ready yet while the run is still in progress."
-            )
-        elif run_status.get("status") == "failed":
-            st.warning(
-                "No pressure results are available because this simulation run failed."
-            )
-        elif results is None:
-            st.warning("Results payload is missing for this completed run.")
-        else:
-            pressures = results.get("pressures") or {}
-            base_vals = (pressures.get("baseline") or {}).get(selected_node)
-            atk_vals = (pressures.get("attack") or {}).get(selected_node)
-
-            if not results.get("time_sec") or base_vals is None or atk_vals is None:
-                st.warning(
-                    f"Pressure measurements are missing for node `{selected_node}` in the saved results."
-                )
-            else:
-                if selected_node in affected_map:
-                    node_impact = affected_map[selected_node]
-                    reasons = "; ".join(node_impact.get("reasons") or [])
+                if not results.get("time_sec") or base_vals is None or atk_vals is None:
                     st.warning(
-                        f"Node **{selected_node}** is **affected** (Rank #{node_impact.get('rank', '-')}, "
-                        f"max drop {node_impact.get('max_pressure_drop_psi', 'N/A')} psi). {reasons}"
+                        f"Pressure measurements are missing for node `{selected_node}` in the saved results."
                     )
                 else:
-                    st.info(
-                        f"Node **{selected_node}** is **unaffected** under the active impact thresholds."
+                    if selected_node in affected_map:
+                        node_impact = affected_map[selected_node]
+                        reasons = "; ".join(node_impact.get("reasons") or [])
+                        st.warning(
+                            f"Node **{selected_node}** is **affected** (Rank #{node_impact.get('rank', '-')}, "
+                            f"max drop {node_impact.get('max_pressure_drop_psi', 'N/A')} psi). {reasons}"
+                        )
+                    else:
+                        st.info(
+                            f"Node **{selected_node}** is **unaffected** under the active impact thresholds."
+                        )
+
+                    pressure_fig = build_pressure_figure(results, selected_node)
+                    pressure_fig.update_layout(title={"text": ""}, margin={"t": 20})
+                    st.plotly_chart(pressure_fig, width="stretch")
+
+                    with st.expander("Pressure measurements"):
+                        time_hours = [
+                            round(float(t) / 3600.0, 3) for t in results["time_sec"]
+                        ]
+                        pressure_table = pd.DataFrame(
+                            {
+                                "Time (hours)": time_hours,
+                                "Baseline (psi)": base_vals,
+                                "Attack (psi)": atk_vals,
+                            }
+                        )
+                        st.caption(
+                            "Row color: yellow for a pressure drop of at least 2.5 psi; red for "
+                            "a drop of at least 5 psi or a drop below 20 psi from a baseline "
+                            "of 20 psi or higher."
+                        )
+                        st.dataframe(
+                            pressure_table.style.apply(
+                                _pressure_difference_row_style, axis=1
+                            ).format({"Time (hours)": "{:.2f}"}),
+                            hide_index=True,
+                        )
+
+        with st.container(border=True):
+            st.subheader("Network comparison")
+            base_col, atk_col = [col.container(border=True) for col in st.columns(2)]
+            with base_col:
+                base_fig = build_network_figure(
+                    topology,
+                    view_mode="baseline",
+                    scenario=selected_scenario,
+                    results=results,
+                    selected_node=selected_node,
+                )
+                if base_fig is None:
+                    st.warning(
+                        "Network coordinates are missing for this model, so the baseline map cannot be drawn."
+                    )
+                else:
+                    st.plotly_chart(
+                        base_fig,
+                        width="stretch",
+                        on_select=lambda: _sync_node_from_plot_selection(
+                            st.session_state.get("baseline_network_plot"),
+                            selectable_nodes,
+                        ),
+                        key="baseline_network_plot",
                     )
 
-                pressure_fig = build_pressure_figure(results, selected_node)
-                st.plotly_chart(pressure_fig, use_container_width=True)
+            with atk_col:
+                atk_fig = build_network_figure(
+                    topology,
+                    view_mode="attack",
+                    scenario=selected_scenario,
+                    results=results,
+                    selected_node=selected_node,
+                )
+                if atk_fig is None:
+                    st.warning(
+                        "Network coordinates are missing for this model, so the attack map cannot be drawn."
+                    )
+                else:
+                    st.plotly_chart(
+                        atk_fig,
+                        width="stretch",
+                        on_select=lambda: _sync_node_from_plot_selection(
+                            st.session_state.get("attack_network_plot"),
+                            selectable_nodes,
+                        ),
+                        key="attack_network_plot",
+                    )
 
-                time_hours = [round(float(t) / 3600.0, 3) for t in results["time_sec"]]
-                pressure_table = pd.DataFrame(
-                    {
-                        "Time (hours)": time_hours,
-                        "Baseline (psi)": base_vals,
-                        "Attack (psi)": atk_vals,
-                    }
-                )
-                st.caption(
-                    "Row color: yellow for a pressure drop of at least 2.5 psi; red for "
-                    "a drop of at least 5 psi or a drop below 20 psi from a baseline "
-                    "of 20 psi or higher."
-                )
-                st.dataframe(
-                    pressure_table.style.apply(
-                        _pressure_difference_row_style, axis=1
-                    ).format({"Time (hours)": "{:.2f}"}),
-                    hide_index=True,
-                )
+        with st.container(border=True):
+            st.subheader("Scenario")
+            _render_scenario_summary(selected_scenario, results, columns=4)
+        _render_run_details(selected_scenario, run_status, results)
 
 
 if __name__ == "__main__":
